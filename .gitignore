@@ -1,0 +1,16 @@
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Large/local data
+/data/
+
+# Documents not stored in Git
+/documents/
+
+# Generated outputs
+/outputs/
+
+# Development-only scripts
+/R/dev/
