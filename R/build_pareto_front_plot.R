@@ -85,7 +85,7 @@ build_pareto_front_plot <- function(pareto_front_on_K) {
   # = Total England area extracted from each K_target i = 1
   pareto_statistics <- lapply(1:length(pareto_front_on_K), function(i) {
     print(i)
-
+    
     tmp <- pareto_front_on_K[[i]]
     beta <- tmp$best_state$beta
     
@@ -94,7 +94,7 @@ build_pareto_front_plot <- function(pareto_front_on_K) {
     
     # State statistics
     state_i <- compute_state_fast(tmp[[2]])
-
+    
     # Output summary
     data.frame(
       K_target = tmp$K,
@@ -116,21 +116,21 @@ build_pareto_front_plot <- function(pareto_front_on_K) {
   # target.
   
   summary(pareto_statistics)
-
+  
   # = Get unique N10 lowest area footprint
   pareto_by_N10 <- pareto_statistics %>% 
     dplyr::group_by(N10) %>% 
     dplyr::slice_min(best_footprint_area_km, n = 1, with_ties = FALSE) %>% 
     dplyr::ungroup() %>% 
     dplyr::arrange(N10)
-
+  
   # Sometimes the forward step finds a lower footprint, which by definition would
   # also satisfy the early N10, therefore we enforce a monotone to correct these
   # small inefficiencies. Obviously, running the optimisation longer might find a
   # more efficient solution to the earlier N10, but in trials it took a long time
   # and made no real difference to the overall pattern of the pareto front.
   pareto_by_N10$footprint_monotone <- cummax(pareto_by_N10$best_footprint_area_km)
-
+  
   # ===
   # === Plot Pareto front - minimum footprint vs N10 (minimising D)
   # ===
@@ -142,29 +142,29 @@ build_pareto_front_plot <- function(pareto_front_on_K) {
       y = U / nS,
       x = footprint_monotone / total_area
     )
-
+  
   # Prepare data
   smooth_df <- min_sol_N10 %>% 
     filter(!is.na(x), !is.na(y))
-
+  
   # Fit monotone decreasing spline (adjust bs = "mpd" or "mpi" to match your front)
   scam_fit <- scam(y ~ s(x, bs = "mpd", k = 40), data = smooth_df)
-
+  
   # Identify points where rates of change are greatest
   eps <- diff(range(smooth_df$x)) * 1e-5
-
+  
   x_seq <- seq(min(smooth_df$x), max(smooth_df$x), length.out = 1000)
   deriv_df <- data.frame(x = x_seq)
-
+  
   Xp <- predict(scam_fit, newdata = transform(deriv_df, x = x + eps), type = "lpmatrix")
   X0 <- predict(scam_fit, newdata = deriv_df, type = "lpmatrix")
   Xm <- predict(scam_fit, newdata = transform(deriv_df, x = x - eps), type = "lpmatrix")
-
+  
   Xderiv <- (Xp - Xm) / (2 * eps)
-
+  
   left_edge <- deriv_df$x - eps < min(smooth_df$x)
   right_edge <- deriv_df$x + eps > max(smooth_df$x)
-
+  
   Xderiv[left_edge, ] <- (Xp[left_edge, ] - X0[left_edge, ]) / eps
   Xderiv[right_edge, ] <- (X0[right_edge, ] - Xm[right_edge, ]) / eps
   
@@ -187,15 +187,15 @@ build_pareto_front_plot <- function(pareto_front_on_K) {
         )
       )
     )
-
+  
   deriv_df_plot <- deriv_df %>% 
     filter(highlighted)
-
+  
   # Predict over a fine grid
   x_seq <- seq(min(smooth_df$x), max(smooth_df$x), length.out = 200)
   pred_df <- data.frame(x = x_seq) |>
     mutate(y = predict(scam_fit, newdata = data.frame(x = x_seq)))
-
+  
   # == Create pareto front plot
   x <- with(min_sol_N10, x)
   y <- with(min_sol_N10, y)
@@ -224,29 +224,47 @@ build_pareto_front_plot <- function(pareto_front_on_K) {
   
   x_by <- nice_by(x_lim, n_breaks = 6)
   y_by <- nice_by(y_lim, n_breaks = 6)
-
+  
   # Now plot
-  pareto_plot <- ggplot(min_sol_N10) +
+  pareto_plot <- pareto_plot <- ggplot(min_sol_N10) +
     geom_line(
       data = deriv_df_plot,
-      aes(x = x, y = y, group = group, colour = rate_class),
-      linewidth = 5,
-      alpha = 0.5,
+      aes(
+        x = x,
+        y = y,
+        group = group,
+        colour = rate_class
+      ),
+      linewidth = 2.5,
+      alpha = 0.55,
       lineend = "round"
     ) +
     scale_colour_manual(
       values = c(
-        "Strong gains" = "firebrick",
+        "Strong gains"       = "firebrick",
         "Intermediate gains" = "goldenrod",
-        "Moderate gains" = "dodgerblue3"
+        "Moderate gains"     = "dodgerblue3"
       ),
-      name = "Marginal gains\n(rate of change)"
+      name = "Marginal gains\n(rate of change)",
+      guide = guide_legend(
+        override.aes = list(
+          linewidth = 1.0,
+          alpha = 1
+        )
+      )
     ) +
-    geom_point(aes(y = y, x = x),
+    geom_point(
+      aes(x = x, y = y),
       colour = "grey50",
-      size = 1.2, alpha = 0.5
+      size = 0.65,
+      alpha = 0.5
     ) +
-    geom_line(aes(y = y, x = x), data = pred_df) +
+    geom_line(
+      data = pred_df,
+      aes(x = x, y = y),
+      colour = "black",
+      linewidth = 0.25
+    ) +
     scale_y_continuous(
       name = "Species reaching +10% abundance target (%)",
       breaks = seq(
@@ -257,7 +275,7 @@ build_pareto_front_plot <- function(pareto_front_on_K) {
       labels = function(x) 100 * (1 - x)
     ) +
     scale_x_continuous(
-      name = "Footprint of planning domain (% land area)",
+      name = "Footprint of spatial planning units\nselected (% land area)",
       breaks = seq(
         floor(x_lim[1] / x_by) * x_by,
         ceiling(x_lim[2] / x_by) * x_by,
@@ -267,15 +285,59 @@ build_pareto_front_plot <- function(pareto_front_on_K) {
     ) +
     coord_cartesian(
       xlim = range(x[ok]),
-      ylim = c(0,0.525)#range(y[ok])
+      ylim = c(0, 0.525),
+      expand = FALSE
     ) +
-    theme_bw(base_size = 14) %+replace%
+    theme_bw(
+      base_size = 7,
+      base_family = "Arial"
+    ) +
     theme(
+      axis.title = element_text(size = 7),
+      axis.text = element_text(size = 6),
+      
       legend.position = "inside",
-      legend.position.inside = c(0.8, 0.8),
-      legend.text = element_text(size = 12)
+      legend.position.inside = c(0.76, 0.78),
+      legend.justification = c(0.5, 0.5),
+      
+      legend.title = element_text(
+        size = 6,
+        margin = margin(b = 2, unit = "pt")
+      ),
+      legend.text = element_text(size = 5.5),
+      legend.key.width = grid::unit(6, "mm"),
+      legend.key.height = grid::unit(2.5, "mm"),
+      legend.spacing.y = grid::unit(0.5, "mm"),
+      legend.background = element_rect(
+        fill = scales::alpha("white", 0.8),
+        colour = NA
+      ),
+      
+      panel.border = element_rect(
+        colour = "black",
+        linewidth = 0.18
+      ),
+      panel.grid.major = element_line(
+        colour = "grey85",
+        linewidth = 0.15
+      ),
+      panel.grid.minor = element_line(
+        colour = "grey92",
+        linewidth = 0.10
+      ),
+      
+      axis.ticks = element_line(linewidth = 0.18),
+      axis.ticks.length = grid::unit(1.5, "mm"),
+      
+      plot.margin = margin(
+        t = 3,
+        r = 3,
+        b = 3,
+        l = 3,
+        unit = "pt"
+      )
     )
-
+  
   # Return
   list(pareto_plot, deriv_df)
   

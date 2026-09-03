@@ -93,6 +93,7 @@ add_progressive_targets <- function(
 }
 
 #' Plot progressive prop species meeting targets by class
+#' phy_select = asai_info_compiled_1174
 plot_progressive_taxon_stack <- function(
     phy_select,
     taxon_col = "CLASS",
@@ -187,12 +188,21 @@ plot_progressive_taxon_stack <- function(
     y_lab <- "Number of species"
   }
   
+  # legend text
+  levels(plot_dt$first_included) <-
+    paste0(
+      "N = ",
+      sub("^N_", "", levels(plot_dt$first_included)),
+      "%"
+    )
+  
   zissou_cols <- hcl.colors(
-    n = length(unique(plot_dt$first_included)),
+    n = dplyr::n_distinct(plot_dt$first_included),
     palette = "Zissou 1"
   ) |>
     colorspace::desaturate(amount = 0.3) |>
     colorspace::lighten(amount = 0.1)
+  
   
   ggplot(
     plot_dt,
@@ -202,23 +212,101 @@ plot_progressive_taxon_stack <- function(
       fill = first_included
     )
   ) +
-    geom_col(position = position_stack(reverse = TRUE)) +
+    geom_col(
+      position = position_stack(reverse = TRUE),
+      width = 0.75
+    ) +
     coord_flip() +
-    scale_fill_manual(values = rev(zissou_cols)) +
+    scale_fill_manual(
+      values = rev(zissou_cols),
+      guide = guide_legend(
+        reverse = FALSE,
+        nrow = 2,
+        byrow = TRUE,
+        theme = theme(
+          legend.title.position = "top",
+          legend.title = element_text(
+            size = 6,
+            hjust = 0,
+            lineheight = 0.9,
+            margin = margin(b = 2, unit = "pt")
+          )
+        )
+      )
+    ) +
     scale_y_continuous(
-      labels = if (as_proportion) scales::percent else waiver()
+      labels = if (as_proportion) {
+        scales::label_number(
+          accuracy = 1,
+          scale = 100
+        )
+      } else {
+        waiver()
+      },
+      expand = expansion(mult = c(0, 0.01))
     ) +
-    guides(fill = guide_legend(reverse = TRUE)) +
     labs(
-      x = taxon_col,
-      y = y_lab,
-      fill = "First included\nby species\ntarget\n",
-      title = paste("Progressive inclusion of species by", tolower(taxon_col))
+      x = NULL,
+      y = "Species (%)",
+      fill = "First included by species target"
     ) +
-    theme_bw(base_size = 14) %+replace% 
+    theme_bw(
+      base_size = 7,
+      base_family = "Arial"
+    ) +
     theme(
       axis.title.y = element_blank(),
-      axis.title.x = element_blank(),
-      axis.text = element_text(size = 12)
+      axis.text.x = element_text(
+        size = 6,
+        colour = "black"
+      ),
+      axis.text.y = element_text(
+        size = 6,
+        colour = "black"
+      ),
+      
+      axis.ticks = element_line(linewidth = 0.18),
+      axis.ticks.length = grid::unit(1.5, "mm"),
+      
+      panel.border = element_rect(
+        colour = "black",
+        linewidth = 0.18
+      ),
+      panel.grid.major.x = element_line(
+        colour = "grey88",
+        linewidth = 0.12
+      ),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      
+      legend.position = "bottom",
+      legend.direction = "horizontal",
+      legend.justification = "left",
+      legend.box.just = "left",
+      
+      legend.text = element_text(size = 5.5),
+      legend.key.width = grid::unit(3, "mm"),
+      legend.key.height = grid::unit(3.5, "mm"),
+      legend.spacing.x = grid::unit(0.5, "mm"),
+      legend.margin = margin(
+        t = 2,
+        r = 0,
+        b = 0,
+        l = 0,
+        unit = "pt"
+      ),
+      
+      plot.margin = margin(
+        t = 3,
+        r = 8,
+        b = 3,
+        l = 3,
+        unit = "pt"
+      )
     )
+  
 }
+
+
+
+

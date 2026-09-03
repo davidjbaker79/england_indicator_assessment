@@ -71,6 +71,7 @@ library(future.apply)
 library(lwgeom)
 library(gtools)
 library(scam)
+library(mgcv)
 library(scico)
 library(ggspatial)
 library(patchwork)
@@ -653,10 +654,9 @@ range_size <- data.frame(
 )
 fwrite(range_size, "outputs/range_sizes.csv")
 
-cbind(species_cols,range_size)
-
+# = Range size summary
 summary(range_size$range_size)
-7.255e+03
+# median = 7.255e+03
 
 # === Produce species range histogram ===
 species_habitat_range <- ggplot(data = range_size, aes(x = range_size)) +
@@ -725,6 +725,16 @@ saveRDS(optimisation_data, file = "outputs/optimisation_data.rds")
 # === Load optimisation data ===
 optimisation_data <- readRDS("outputs/optimisation_data.rds")
 
+# = SAVE FOR FIGSHARE = #
+
+# = Save asai_cxs_eng
+fwrite(optimisation_data$asai_cxs_eng, "outputs/FigShareDat/asai_species_occurrence_england.csv")
+
+# = Save prop_suit_cs
+fwrite(optimisation_data$prop_suit_cs, "outputs/FigShareDat/proportion_suitable_habitat_england.csv")
+
+# ====================== #
+
 # === os_gridref_inc ===
 os_gridref_inc <- optimisation_data$asai_cxs_eng$os_gridref
 
@@ -771,6 +781,7 @@ saveRDS(pareto_front_on_K, "outputs/pareto_front_on_K_0_to_1174_by_1_beta1_costE
 #==============================================================================#
 # Analysis - results
 #==============================================================================#
+
 
 # === Major results ===
 #
@@ -826,8 +837,87 @@ species_names <- gsub("_", " ", names(asai_cxs_eng)[2:ncol(asai_cxs_eng)])
 # Area
 area_km2 <- cellXarea$area[which(cellXarea$os_gridref %in% asai_cxs_eng$os_gridref)]
 
+# === Nature figure styling ===
+
+nature_font <- "Arial"
+
+# Text sizes: points
+text_main   <- 7
+text_small  <- 6
+text_map    <- 5.5
+text_legend <- 5.5
+
+# Convert point sizes for geoms, which use millimetres
+pt_to_mm <- 1 / ggplot2::.pt
+
+# Line widths: millimetres
+line_main     <- 0.30   # approximately 0.85 pt
+line_boundary <- 0.12
+line_border   <- 0.18
+
+# Point size: millimetres
+point_size <- 0.65
+
+# Theme for mapping
+map_theme <- theme_void(
+  base_size = 7,
+  base_family = nature_font
+) +
+  theme(
+    panel.grid.major = element_line(
+      colour = "grey65",
+      linewidth = 0.15
+    ),
+    panel.grid.minor = element_blank(),
+    
+    axis.text = element_text(
+      size = 5.5,
+      colour = "grey30"
+    ),
+    axis.ticks = element_line(
+      colour = "grey30",
+      linewidth = 0.15
+    ),
+    axis.ticks.length = grid::unit(1, "mm"),
+    
+    plot.margin = margin(
+      t = 2,
+      r = 2,
+      b = 2,
+      l = 2,
+      unit = "pt"
+    )
+  )
+
+map_coord <- coord_sf(
+  xlim = st_bbox(gb_eng_crop)[c("xmin", "xmax")],
+  ylim = st_bbox(gb_eng_crop)[c("ymin", "ymax")],
+  expand = FALSE
+)
+
+# === Shared solution types and colours
+
+solution_levels <- c(
+  "GM target only (unconstrained)",
+  "GM target & 85% species reaching +10% abundance target",
+  "GM target & 100% species reaching +10% abundance target"
+)
+
+solution_cols <- setNames(
+  rev(
+    colorspace::desaturate(
+      hcl.colors(
+        n = 3,
+        palette = "Zissou 1"
+      ),
+      amount = 0.25
+    )
+  ),
+  solution_levels
+)
+
 # ====
-# === Build pareto front (beta = 1 and eta = 1)
+# === Build pareto front (beta = 1 and eta = 1) - FIGURE 1
 # ====
 
 # Load optimisation results
@@ -836,9 +926,26 @@ pareto_front_on_K_b1_e1 <- readRDS("outputs/pareto_front_on_K_0_to_1174_by_1_bet
 # Build plot
 pareto_plot_b1_e1 <- build_pareto_front_plot(pareto_front_on_K_b1_e1)
 
-# = Save
-ggsave(filename = "outputs/pareto_front_panel_beta1.png", 
-       plot = pareto_plot_b1_e1[[1]], width = 8, height = 6)
+# Save as pdf and png
+ggsave(
+  filename = "outputs/Fig1_pareto_frontier.pdf",
+  plot = pareto_plot_b1_e1[[1]],
+  device = cairo_pdf,
+  width = 88,
+  height = 72,
+  units = "mm",
+  bg = "white"
+)
+
+ggsave(
+  filename = "outputs/Fig1_pareto_frontier.png",
+  plot = pareto_plot_b1_e1[[1]],
+  width = 88,
+  height = 72,
+  units = "mm",
+  dpi = 300,
+  bg = "white"
+)
 
 # === Extract summary statistics for N10s
 
@@ -894,7 +1001,7 @@ deriv_summary_85 <- deriv_df |>
   )
 
 # ====
-# === 2) Plot minimal footprints at different N10
+# === 2) Plot minimal footprints at different N10 - FIGURE 3
 # ====
 
 # We want to show how the spatial pattern of the footprint changes as you enforce
@@ -1067,7 +1174,8 @@ zone_end_labels <- smooth_dat %>%
   slice_max(N10_pc, n = 1, with_ties = FALSE) %>%
   ungroup()
 
-# = Plot smooths
+
+# = Footprint by zone
 footprint_per_zone_by_N10 <- ggplot() +
   geom_point(
     data = footprint_plot_dat,
@@ -1076,6 +1184,7 @@ footprint_per_zone_by_N10 <- ggplot() +
       y = observed_expected_ratio,
       colour = Zone
     ),
+    size = point_size,
     alpha = 0.25
   ) +
   geom_line(
@@ -1086,7 +1195,7 @@ footprint_per_zone_by_N10 <- ggplot() +
       colour = Zone,
       group = Zone
     ),
-    linewidth = 1.5
+    linewidth = line_main
   ) +
   ggrepel::geom_text_repel(
     data = zone_end_labels,
@@ -1096,35 +1205,64 @@ footprint_per_zone_by_N10 <- ggplot() +
       label = Zone,
       colour = Zone
     ),
+    size = text_small * pt_to_mm,
+    
+    # Keep labels aligned in a column beyond the curve endpoints
     direction = "y",
     hjust = 0,
-    nudge_x = 2,
+    nudge_x = 3.5,
+    
+    # Improve vertical separation
+    force = 2,
+    force_pull = 0.5,
+    box.padding = 0.15,
+    point.padding = 0.05,
+    max.overlaps = Inf,
+    
+    # Connecting lines
     segment.colour = "grey60",
-    box.padding = 0.2,
-    point.padding = 0.2,
+    segment.size = line_boundary,
+    segment.curvature = 0,
     min.segment.length = 0,
+    
     seed = 1,
     show.legend = FALSE
   ) +
-  scale_colour_manual(
-    values = zone_cols,
-    drop = FALSE
-  ) +
   scale_x_continuous(
-    expand = expansion(mult = c(0, 0.06))
+    # Keep only a small expansion inside the plotting panel
+    expand = expansion(mult = c(0, 0.01))
   ) +
   scale_y_continuous(
-    expand = expansion(mult = c(0, 0.02))
+    # Give ggrepel slightly more vertical room
+    expand = expansion(mult = c(0.03, 0.05))
   ) +
-  coord_cartesian(clip = "off") +
-  theme_bw(base_size = 16) +
+  coord_cartesian(
+    clip = "off"
+  ) +
+  theme_bw(
+    base_size = text_main,
+    base_family = nature_font
+  ) +
   theme(
     legend.position = "none",
+    
+    axis.title = element_text(size = text_main),
+    axis.text  = element_text(size = text_small),
+    
+    panel.grid.major = element_line(linewidth = 0.15),
+    panel.grid.minor = element_line(linewidth = 0.10),
+    panel.border = element_rect(
+      linewidth = line_border,
+      colour = "black"
+    ),
+    
+    # Outward-nudged labels
     plot.margin = margin(
-      t = 10,
-      r = 35,
-      b = 10,
-      l = 10
+      t = 3,
+      r = 30,
+      b = 3,
+      l = 3,
+      unit = "pt"
     )
   ) +
   labs(
@@ -1132,10 +1270,19 @@ footprint_per_zone_by_N10 <- ggplot() +
     y = "Observed / expected footprint\n(values > 1 = greater than expected)"
   )
 
-# = Insert map with region number labels
+
+# = Insert map
 bio_geo_zone_map_inset <- ggplot() +
-  geom_sf(data = gb_eng_crop, fill = "grey95", colour = NA) +
-  geom_sf(data = eng_only, fill = "grey80", colour = NA) +
+  geom_sf(
+    data = gb_eng_crop,
+    fill = "grey95",
+    colour = NA
+  ) +
+  geom_sf(
+    data = eng_only,
+    fill = "grey80",
+    colour = NA
+  ) +
   geom_sf(
     data = bio_geo_zone_bd %>%
       mutate(
@@ -1146,128 +1293,146 @@ bio_geo_zone_map_inset <- ggplot() +
       ),
     aes(fill = Zone),
     colour = "grey30",
-    linewidth = 0.15
+    linewidth = line_boundary
   ) +
   geom_sf_text(
     data = zone_label_pts,
     aes(label = Zone),
-    size = 3,
+    size = text_map * pt_to_mm,
+    family = nature_font,
     fontface = "bold",
     colour = "black"
   ) +
-  scale_fill_manual(values = zone_cols, drop = FALSE) +
-  theme_void() +
+  scale_fill_manual(
+    values = zone_cols,
+    drop = FALSE
+  ) +
+  theme_void(
+    base_size = text_main,
+    base_family = nature_font
+  ) +
   theme(
     legend.position = "none",
     plot.background = element_rect(
       fill = "white",
       colour = "grey30",
-      linewidth = 0.3
+      linewidth = line_border
     ),
-    plot.margin = margin(2, 2, 2, 2)
-  )
+    plot.margin = margin(
+      1, 1, 1, 1,
+      unit = "pt"
+    )
+  )  
 
-
-# = Graph with map inset in top right
+# = Create zonal panel
 zones_panel <- footprint_per_zone_by_N10 +
   inset_element(
     bio_geo_zone_map_inset,
-    left = 0.56,
-    bottom = 0.54,
-    right = 1.13,
-    top = 0.985,
+    left = 0.57,
+    bottom = 0.55,
+    right = 0.99,
+    top = 0.98,
     align_to = "panel",
     clip = TRUE
-  ) #+plot_layout(tag_level = "keep")
-
-
-# = Save
-ggsave(filename = "outputs/footprint_by_zone.png", 
-       plot = zones_panel, width = 9, height = 6)
-
-# ====
-# === Selection frequency
-# ====
-
-# = Selection frequency
-selection_freq <- lapply(1:length(pareto_front_on_K_b1_e1), function(x) {
-  tmp <- pareto_front_on_K_b1_e1[[x]]$best_state$x
-})
-selection_freq <- rowSums(as.data.frame(do.call(cbind, selection_freq)))
-selection_freq <- cbind(asai_cxs_eng[, 1], selection_freq = selection_freq)
-selection_freq_sf <- left_join(eng10km2, selection_freq, by = join_by(os_gridref)) %>% 
-  mutate(selection_freq = ifelse(selection_freq == 0, NA, (selection_freq / 1176) * 100))
-# Selection frequency figure
-cols <- c("#1A0500", "#5C0F00", "#8B1A1A", "#C5301F", "#E8502A", "#F59E00", "#FFE800")
-
-# = Plot selection frequency
+  )
+# == Selectiion frequency
 cell_selection_frequency <- ggplot(selection_freq_sf) +
-  geom_sf(data = gb_eng_crop, fill = "grey95") +
-  geom_sf(aes(fill = selection_freq, colour = selection_freq)) +
+  geom_sf(
+    data = gb_eng_crop,
+    fill = "grey95",
+    colour = "grey70",
+    linewidth = line_boundary
+  ) +
+  geom_sf(
+    aes(
+      fill = selection_freq,
+      colour = selection_freq
+    ),
+    linewidth = 0.05
+  ) +
   scale_fill_gradientn(
-    colours  = cols,
-    values  = scales::rescale(c(0, 5, 20, 60, 100)),
-    limits   = c(0, 100),
+    colours = cols,
+    values = scales::rescale(c(0, 5, 20, 60, 100)),
+    limits = c(0, 100),
     na.value = "grey80",
-    name     = "Selected (%)",
-    guide    = guide_colourbar(
-      barwidth     = 0.8,
-      barheight    = 8,
-      ticks.colour = "grey40"
+    name = "Selected (%)",
+    guide = guide_colourbar(
+      barwidth = grid::unit(2.5, "mm"),
+      barheight = grid::unit(24, "mm"),
+      ticks.colour = "grey40",
+      ticks.linewidth = line_boundary,
+      frame.colour = "grey40",
+      frame.linewidth = line_boundary
     )
   ) +
   scale_colour_gradientn(
-    colours  = cols,
-    values  = scales::rescale(c(0, 5, 20, 60, 100)),
-    limits   = c(0, 100),
+    colours = cols,
+    values = scales::rescale(c(0, 5, 20, 60, 100)),
+    limits = c(0, 100),
     na.value = "grey80",
-    name     = "Selected (%)",
-    guide    = guide_colourbar(
-      barwidth     = 0.8,
-      barheight    = 8,
-      ticks.colour = "grey40"
-    )
-  ) +
-  theme_minimal(base_size = 16) +      
-  theme(
-    legend.position        = "inside",
-    legend.position.inside = c(0.15, 0.55),
-    legend.background = element_rect(fill = NA, colour = NA),
-    legend.title      = element_text(size = 12),
-    legend.text       = element_text(size = 10),
-    plot.background   = element_rect(fill = NA, colour = NA),
-    plot.margin       = margin(10, 10, 10, 10)
+    name = "Selected (%)",
+    guide = "none"
   ) +
   coord_sf(
     xlim = st_bbox(gb_eng_crop)[c("xmin", "xmax")],
     ylim = st_bbox(gb_eng_crop)[c("ymin", "ymax")],
     expand = FALSE
+  ) +
+  theme_void(
+    base_size = text_main,
+    base_family = nature_font
+  ) +
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.15, 0.55),
+    
+    legend.title = element_text(
+      size = text_small,
+      margin = margin(b = 2, unit = "pt")
+    ),
+    legend.text = element_text(size = text_legend),
+    legend.ticks.length = grid::unit(1.5, "mm"),
+    legend.background = element_rect(
+      fill = scales::alpha("white", 0.75),
+      colour = NA
+    ),
+    
+    plot.background = element_rect(
+      fill = NA,
+      colour = NA
+    ),
+    plot.margin = margin(
+      3, 3, 3, 3,
+      unit = "pt"
+    )
   )
 
-# = Number selection 100%
-select_freq <- selection_freq$selection_freq / nS
-length(select_freq[select_freq == 1])
-length(select_freq[select_freq > 0])
-
-# = Combined panel
-
-# Aspect ratio of the map extent
+# = Create panel
+# Aspect ratio of map extent
 bb <- st_bbox(eng10km2)
+
 map_aspect <- as.numeric(
   (bb["xmax"] - bb["xmin"]) /
     (bb["ymax"] - bb["ymin"])
 )
+
 zones_width <- 9
 map_width   <- 6 * map_aspect
-zones_panel <- zones_panel +
-  labs(tag = "a)")
 
-# Treat the complete plot + inset as ONE panel (necessary for annotations)
 zones_panel_wrapped <- wrap_elements(
   full = zones_panel
 )
 
-# Create panel
+# Preserve original overall aspect ratio
+original_width_in  <- zones_width + map_width
+original_height_in <- 6
+
+figure_width_mm <- 180
+
+figure_height_mm <- figure_width_mm *
+  original_height_in /
+  original_width_in
+
 Zonal_Select_Panel <-
   zones_panel_wrapped +
   cell_selection_frequency +
@@ -1275,21 +1440,42 @@ Zonal_Select_Panel <-
     widths = c(zones_width, map_width)
   ) +
   plot_annotation(
-    tag_levels = "a",
-    tag_suffix = ")"
+    tag_levels = "a"
   ) &
   theme(
-    plot.tag = element_text(size = 16, face = "bold"),
+    text = element_text(
+      family = nature_font
+    ),
+    plot.tag = element_text(
+      family = nature_font,
+      size = text_main,
+      face = "bold"
+    ),
     plot.tag.position = c(0, 1)
   )
 
-# Save at exactly the dimensions implied by the panels
+# Final editable vector artwork
 ggsave(
-  "outputs/Zonal_Select_Panel.png",
-  Zonal_Select_Panel,
-  width = zones_width + map_width,
-  height = 6
+  filename = "outputs/Fig3_regional_bias.pdf",
+  plot = Zonal_Select_Panel,
+  device = cairo_pdf,
+  width = figure_width_mm,
+  height = figure_height_mm,
+  units = "mm",
+  bg = "white"
 )
+
+# Preview at the same physical dimensions
+ggsave(
+  filename = "outputs/Fig3_regional_bias.png",
+  plot = Zonal_Select_Panel,
+  width = figure_width_mm,
+  height = figure_height_mm,
+  units = "mm",
+  dpi = 300,
+  bg = "white"
+)
+
 
 # === 
 # === Uncontrained (K_target = 0)
@@ -1305,41 +1491,95 @@ unconst_footprint_sf <- left_join(eng10km2, unconst_footprint, by = join_by(os_g
   filter(!is.na(footprint))
 
 # = Create map of selected cells
-unconst_footprint_sol <- ggplot(unconst_footprint_sf[unconst_footprint_sf$footprint == 1, ]) +
+unconst_footprint_sol <-
+  ggplot(
+    unconst_footprint_sf[
+      unconst_footprint_sf$footprint == 1,
+    ]
+  ) +
   geom_sf(data = gb_eng_crop, fill = "grey95") +
   geom_sf(data = eng_only, fill = "grey80") +
-  #geom_sf(data = bio_geo_zone, colour = "grey20", fill = NA) +
-  geom_sf(data = NP, colour = NA, fill = "forestgreen", alpha = 0.2) +
-  geom_sf(data = NL, colour = NA, fill = "blue", alpha = 0.2) +
-  geom_sf(data = SSSI, colour = NA, fill = "orange", alpha = 0.5) +
-  geom_sf(aes(fill = footprint, colour = footprint)) +
-  scale_fill_manual(values = c("1" = "red", "0" = "grey80")) +
-  scale_colour_manual(values = c("1" = "red", "0" = "grey80")) +
-  annotation_scale(
-    location   = "br",
-    width_hint = 0.25,
-    line_width = 2,
-    text_cex = 1.2,
-    style      = "ticks",
-    line_col   = "grey10",
-    text_col   = "grey10"
+  geom_sf(
+    data = NP,
+    aes(fill = "National Parks"),
+    colour = NA,
+    alpha = 0.2
   ) +
-  annotation_north_arrow(
-    location = "tr",
-    pad_y    = unit(0.5, "cm"),
-    style    = north_arrow_orienteering(
-      line_col = "grey10",
-      text_col = "grey10",
-      text_size = 12
+  geom_sf(
+    data = NL,
+    aes(fill = "National Landscapes"),
+    colour = NA,
+    alpha = 0.2
+  ) +
+  geom_sf(
+    data = SSSI,
+    aes(fill = "Sites of Special Scientific Interest"),
+    colour = NA,
+    alpha = 0.5
+  ) +
+  geom_sf(
+    aes(fill = "Targeted grid cells"),
+    colour = NA
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    breaks = c(
+      "Targeted grid cells",
+      "National Parks",
+      "National Landscapes",
+      "Sites of Special Scientific Interest"
+    ),
+    values = c(
+      "Targeted grid cells" = "red",
+      "National Parks" = "forestgreen",
+      "National Landscapes" = "blue",
+      "Sites of Special Scientific Interest" = "orange"
+    ),
+    guide = guide_legend(
+      nrow = 1,
+      byrow = TRUE,
+      override.aes = list(
+        alpha = c(1, 0.5, 0.5, 0.7),
+        colour = NA
+      )
     )
   ) +
-  theme_minimal(base_size = 14) +      
-  theme(legend.position = "none") +
-  coord_sf(
-    xlim = st_bbox(gb_eng_crop)[c("xmin", "xmax")],
-    ylim = st_bbox(gb_eng_crop)[c("ymin", "ymax")],
-    expand = FALSE
-  )
+  # Scale bar sized for a c. 60 mm-wide panel
+  annotation_scale(
+    location = "br",
+    width_hint = 0.28,
+    style = "ticks",
+    
+    line_width = 0.45,
+    line_col = "grey10",
+    text_col = "grey10",
+    
+    text_cex = 0.65,
+    text_family = nature_font,
+    
+    height = grid::unit(1.2, "mm"),
+    pad_x = grid::unit(2, "mm"),
+    pad_y = grid::unit(2, "mm"),
+    text_pad = grid::unit(1, "mm")
+  ) +
+  
+  # North arrow sized explicitly in physical units
+  annotation_north_arrow(
+    location = "tr",
+    height = grid::unit(8, "mm"),
+    width = grid::unit(8, "mm"),
+    pad_x = grid::unit(2, "mm"),
+    pad_y = grid::unit(2, "mm"),
+    style = north_arrow_orienteering(
+      line_width = 0.45,
+      line_col = "grey10",
+      text_col = "grey10",
+      text_family = nature_font,
+      text_size = 6
+    )
+  ) +
+  map_coord +
+  map_theme
 
 # === 
 # === N10 = 85% 
@@ -1367,23 +1607,61 @@ pc85_footprint_sf <- left_join(eng10km2, pc85_footprint, by = join_by(os_gridref
   filter(!is.na(footprint))
 
 # = Create map of selected cells
-pc85_footprint_sol <- ggplot(pc85_footprint_sf[pc85_footprint_sf$footprint == 1, ]) +
+pc85_footprint_sol <-
+  ggplot(
+    pc85_footprint_sf[
+      pc85_footprint_sf$footprint == 1,
+    ]
+  ) +
   geom_sf(data = gb_eng_crop, fill = "grey95") +
   geom_sf(data = eng_only, fill = "grey80") +
-  #geom_sf(data = bio_geo_zone, colour = "grey20", fill = NA) +
-  geom_sf(data = NP, colour = NA, fill = "forestgreen", alpha = 0.2) +
-  geom_sf(data = NL, colour = NA, fill = "blue", alpha = 0.2) +
-  geom_sf(data = SSSI, colour = NA, fill = "orange", alpha = 0.5) +
-  geom_sf(aes(fill = footprint, colour = footprint)) +
-  scale_fill_manual(values = c("1" = "red", "0" = "grey80")) +
-  scale_colour_manual(values = c("1" = "red", "0" = "grey80")) +
-  theme_minimal(base_size = 14) +      
-  theme(legend.position = "none") +
-  coord_sf(
-    xlim = st_bbox(gb_eng_crop)[c("xmin", "xmax")],
-    ylim = st_bbox(gb_eng_crop)[c("ymin", "ymax")],
-    expand = FALSE
-  )
+  geom_sf(
+    data = NP,
+    aes(fill = "National Parks"),
+    colour = NA,
+    alpha = 0.2
+  ) +
+  geom_sf(
+    data = NL,
+    aes(fill = "National Landscapes"),
+    colour = NA,
+    alpha = 0.2
+  ) +
+  geom_sf(
+    data = SSSI,
+    aes(fill = "Sites of Special Scientific Interest"),
+    colour = NA,
+    alpha = 0.5
+  ) +
+  geom_sf(
+    aes(fill = "Targeted grid cells"),
+    colour = NA
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    breaks = c(
+      "Targeted grid cells",
+      "National Parks",
+      "National Landscapes",
+      "Sites of Special Scientific Interest"
+    ),
+    values = c(
+      "Targeted grid cells" = "red",
+      "National Parks" = "forestgreen",
+      "National Landscapes" = "blue",
+      "Sites of Special Scientific Interest" = "orange"
+    ),
+    guide = guide_legend(
+      nrow = 1,
+      byrow = TRUE,
+      override.aes = list(
+        alpha = c(1, 0.5, 0.5, 0.7),
+        colour = NA
+      )
+    )
+  ) +
+  map_coord +
+  map_theme
 
 # === 
 # === N10 = 1174
@@ -1398,23 +1676,62 @@ pc100_footprint_sf <- left_join(eng10km2, pc100_footprint, by = join_by(os_gridr
   mutate(footprint = factor(footprint)) %>%
   filter(!is.na(footprint))
 
-# Map
-pc100_footprint_sol <- ggplot(pc100_footprint_sf[pc100_footprint_sf$footprint == 1, ]) +
+# = Create map of selected cells
+pc100_footprint_sol <-
+  ggplot(
+    pc100_footprint_sf[
+      pc100_footprint_sf$footprint == 1,
+    ]
+  ) +
   geom_sf(data = gb_eng_crop, fill = "grey95") +
   geom_sf(data = eng_only, fill = "grey80") +
-  #geom_sf(data = bio_geo_zone, colour = "grey20", fill = NA) +
-  geom_sf(data = NP, colour = NA, fill = "forestgreen", alpha = 0.2) +
-  geom_sf(data = NL, colour = NA, fill = "blue", alpha = 0.2) +
-  geom_sf(data = SSSI, colour = NA, fill = "orange", alpha = 0.5) +
-  geom_sf(aes(fill = footprint, colour = footprint)) +
-  scale_fill_manual(values = c("1" = "red", "0" = "grey80")) +
-  theme_minimal(base_size = 14) +      
-  theme(legend.position = "none") +
-  coord_sf(
-    xlim = st_bbox(gb_eng_crop)[c("xmin", "xmax")],
-    ylim = st_bbox(gb_eng_crop)[c("ymin", "ymax")],
-    expand = FALSE
-  )
+  geom_sf(
+    data = NP,
+    aes(fill = "National Parks"),
+    colour = NA,
+    alpha = 0.2
+  ) +
+  geom_sf(
+    data = NL,
+    aes(fill = "National Landscapes"),
+    colour = NA,
+    alpha = 0.2
+  ) +
+  geom_sf(
+    data = SSSI,
+    aes(fill = "Sites of Special Scientific Interest"),
+    colour = NA,
+    alpha = 0.5
+  ) +
+  geom_sf(
+    aes(fill = "Targeted grid cells"),
+    colour = NA
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    breaks = c(
+      "Targeted grid cells",
+      "National Parks",
+      "National Landscapes",
+      "Sites of Special Scientific Interest"
+    ),
+    values = c(
+      "Targeted grid cells" = "red",
+      "National Parks" = "forestgreen",
+      "National Landscapes" = "blue",
+      "Sites of Special Scientific Interest" = "orange"
+    ),
+    guide = guide_legend(
+      nrow = 1,
+      byrow = TRUE,
+      override.aes = list(
+        alpha = c(1, 0.5, 0.5, 0.7),
+        colour = NA
+      )
+    )
+  ) +
+  map_coord +
+  map_theme
 
 
 # ====
@@ -1422,17 +1739,64 @@ pc100_footprint_sol <- ggplot(pc100_footprint_sf[pc100_footprint_sf$footprint ==
 # ====
 
 # = Panel with min, max, and selection freq panels
-footprint_panel <- 
-  unconst_footprint_sol + pc85_footprint_sol +  pc100_footprint_sol  +
-  plot_annotation(tag_levels = "a", tag_suffix = ")") &
+footprint_panel <-
+  unconst_footprint_sol +
+  pc85_footprint_sol +
+  pc100_footprint_sol +
+  plot_layout(
+    nrow = 1,
+    widths = c(1, 1, 1),
+    guides = "collect"
+  ) +
+  plot_annotation(
+    tag_levels = "a"
+  ) &
   theme(
-    plot.tag = element_text(size = 16, face = "bold"),
-    plot.tag.position = c(0, 1)
+    text = element_text(
+      family = nature_font
+    ),
+    plot.tag = element_text(
+      family = nature_font,
+      size = 7,
+      face = "bold"
+    ),
+    plot.tag.position = c(0, 1),
+    
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.text = element_text(size = 5.5),
+    legend.key.width = grid::unit(4, "mm"),
+    legend.key.height = grid::unit(3, "mm"),
+    legend.spacing.x = grid::unit(1.5, "mm"),
+    legend.margin = margin(
+      t = 2,
+      r = 0,
+      b = 0,
+      l = 0,
+      unit = "pt"
+    )
   )
 
-# = Save
-ggsave(filename = "outputs/footprint_panel_beta1_beta1_eta1_v3.png", 
-       plot = footprint_panel, width = 15, height = 5)
+# = Save as pdf and png
+ggsave(
+  filename = "outputs/Fig2_footprint_panel.pdf",
+  plot = footprint_panel,
+  device = cairo_pdf,
+  width = 180,
+  height = 60,
+  units = "mm",
+  bg = "white"
+)
+
+ggsave(
+  filename = "outputs/Fig2_footprint_panel.png",
+  plot = footprint_panel,
+  width = 180,
+  height = 60,
+  units = "mm",
+  dpi = 300,
+  bg = "white"
+)
 
   
 # ====
@@ -1555,10 +1919,10 @@ hab_long[
   ,
   scenario := fifelse(
     scenario == "log2_ratio_s",
-    "GM target only\n(unconstrained)", fifelse(
+    "GM target only (unconstrained)", fifelse(
       scenario == "log2_ratio_85",
-      "GM target & 85% species reaching +10%\nabundance target",
-      "GM target & 100% species reaching +10%\nabundance target"
+      "GM target & 85% species reaching +10% abundance target",
+      "GM target & 100% species reaching +10% abundance target"
     )
   )
 ]
@@ -1567,46 +1931,157 @@ hab_long[
 hab_long[, habitat := factor(habitat, levels = hab_order)]
 
 # Plot observed vs expected habitat ratios
-habitat_representation <- ggplot(hab_long, aes(x = habitat, y = log2_ratio, fill = scenario)) +
-  geom_hline(yintercept = 0, linetype = "dashed") +
+
+habitat_representation <-
+  ggplot(
+    hab_long,
+    aes(
+      x = habitat,
+      y = log2_ratio,
+      fill = scenario
+    )
+  ) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    colour = "grey30",
+    linewidth = 0.25
+  ) +
   geom_col(
     position = position_dodge(width = 0.8),
     width = 0.7,
     na.rm = TRUE
   ) +
   scale_fill_manual(
-    values = rev(
-      colorspace::desaturate(
-        hcl.colors(
-          length(unique(range_plot_data$type)),
-          palette = "Zissou 1"
-        ),
-        amount = 0.25
-      )
-    ),
-    guide = guide_legend(reverse = TRUE)
+    values = solution_cols,
+    breaks = rev(solution_levels),
+    drop = FALSE,
+    guide = guide_legend(
+      reverse = TRUE,
+      ncol = 1,
+      byrow = TRUE
+    )
   ) +
   coord_flip() +
   labs(
     x = NULL,
-    y = expression(log[2]("observed / expected habitat proportion")),
+    y = expression(
+      log[2] * "(observed / expected habitat proportion)"
+    ),
     fill = NULL
-  )  +
-  theme_bw(base_size = 16) +
+  ) +
+  theme_bw(
+    base_size = 7,
+    base_family = "Arial"
+  ) +
   theme(
+    axis.title.x = element_text(
+      size = 7,
+      margin = margin(t = 3, unit = "pt")
+    ),
+    axis.text.x = element_text(
+      size = 6,
+      colour = "black"
+    ),
+    axis.text.y = element_text(
+      size = 6,
+      colour = "black"
+    ),
+    
+    axis.ticks = element_line(
+      linewidth = 0.18
+    ),
+    axis.ticks.length = grid::unit(1.5, "mm"),
+    
+    panel.border = element_rect(
+      colour = "black",
+      linewidth = 0.18
+    ),
+    panel.grid.major = element_line(
+      colour = "grey88",
+      linewidth = 0.12
+    ),
+    panel.grid.minor = element_blank(),
+    
     legend.position = "inside",
-    legend.position.inside = c(0.275, 0.8),
-    legend.text = element_text(size = 14),
-    legend.key.height = unit(40, "pt"),
-    legend.spacing.y = unit(8, "pt"),
-    axis.text.y = element_text(size = 16),
-    axis.text.x = element_text(size = 16)
+    legend.position.inside = c(0.275, 0.80),
+    legend.justification = c(0.5, 0.5),
+    
+    legend.text = element_text(
+      size = 5.5
+    ),
+    legend.key.width = grid::unit(4, "mm"),
+    legend.key.height = grid::unit(4, "mm"),
+    legend.spacing.y = grid::unit(0.5, "mm"),
+    
+    legend.background = element_rect(
+      fill = scales::alpha("white", 0.85),
+      colour = NA
+    ),
+    legend.margin = margin(
+      t = 2,
+      r = 2,
+      b = 2,
+      l = 2,
+      unit = "pt"
+    ),
+    
+    plot.margin = margin(
+      t = 3,
+      r = 3,
+      b = 3,
+      l = 3,
+      unit = "pt"
+    )
   )
 
-# = Save
-ggsave("outputs/habitat_representation_figure.png", 
-       plot = habitat_representation, width = 12, height = 8)
+habitat_representation <- habitat_representation +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "vertical",
+    legend.justification = "left",
+    
+    legend.text = element_text(size = 5.5),
+    legend.key.width = grid::unit(3.5, "mm"),
+    legend.key.height = grid::unit(3.5, "mm"),
+    
+    legend.box.margin = margin(
+      t = 2,
+      r = 0,
+      b = 0,
+      l = 0,
+      unit = "pt"
+    )
+  ) +
+  guides(
+    fill = guide_legend(
+      reverse = TRUE,
+      ncol = 1,
+      byrow = TRUE
+    )
+  )
 
+# = Save as pdf and png
+ggsave(
+  filename = "outputs/Fig4_habitat_representation.pdf",
+  plot = habitat_representation,
+  device = cairo_pdf,
+  width = 88,
+  height = 105,
+  units = "mm",
+  bg = "white"
+)
+
+ggsave(
+  filename = "outputs/Fig4_habitat_representation.png",
+  plot = habitat_representation,
+  width = 88,
+  height = 105,
+  units = "mm",
+  dpi = 300,
+  bg = "white"
+)
+  
 
 # ====
 # === Species traits associated with selection
@@ -1798,7 +2273,7 @@ range_plot_data <- data.frame(
     range_size$range_size
   ),
   type = rep(
-    c("GM target (unconstrained)", 
+    c("GM target only (unconstrained)", 
       "GM target & 85% species reaching +10% abundance target",
       "GM target & 100% species reaching +10% abundance target"),
     c(length(unconstrained_ranges), length(sol85_ranges), nrow(range_size))
@@ -1817,49 +2292,111 @@ range_size_by_solution <- ggplot(
     bins = 100,
     alpha = 0.8,
     colour = "white",
-    linewidth = 0.15
+    linewidth = 0.08
   ) +
   facet_wrap(
-    ~ type,
+    ~type,
     ncol = 1,
-    scales = "free_y"
+    scales = "free_y",
+    labeller = labeller(
+      type = label_wrap_gen(width = 70)
+    )
+  ) +
+  scale_x_continuous(
+    breaks = scales::breaks_extended(n = 4),
+    labels = scales::label_comma(accuracy = 1),
+    expand = expansion(mult = c(0, 0.02))
   ) +
   scale_fill_manual(
-    values = rev(
-      colorspace::desaturate(
-        hcl.colors(
-          length(unique(range_plot_data$type)),
-          palette = "Zissou 1"
-        ),
-        amount = 0.25
-      )
+    values = solution_cols,
+    breaks = rev(solution_levels),
+    drop = FALSE,
+    guide = guide_legend(
+      reverse = TRUE,
+      ncol = 1,
+      byrow = TRUE
     )
   ) +
   labs(
-    x = expression("Range size (km"^2*")"),
+    x = expression("Range size (km"^2 * ")"),
     y = "Number of species"
   ) +
   guides(fill = "none") +
-  theme_bw(base_size = 16) +
+  theme_bw(
+    base_size = 7,
+    base_family = "Arial"
+  ) +
   theme(
+    axis.title = element_text(size = 7),
+    axis.title.x = element_text(
+      margin = margin(t = 3, unit = "pt")
+    ),
+    axis.title.y = element_text(
+      margin = margin(r = 3, unit = "pt")
+    ),
+    axis.text = element_text(
+      size = 6,
+      colour = "black"
+    ),
+    
+    axis.ticks = element_line(linewidth = 0.18),
+    axis.ticks.length = grid::unit(1.5, "mm"),
+    
     strip.background = element_blank(),
     strip.text = element_text(
+      size = 6,
       face = "bold",
-      hjust = 0
+      hjust = 0,
+      lineheight = 0.9,
+      margin = margin(
+        t = 2,
+        r = 0,
+        b = 2,
+        l = 0,
+        unit = "pt"
+      )
     ),
+    
+    panel.border = element_rect(
+      colour = "black",
+      linewidth = 0.18
+    ),
+    panel.grid.major = element_line(
+      colour = "grey88",
+      linewidth = 0.12
+    ),
+    panel.grid.minor = element_blank(),
+    
+    panel.spacing.y = grid::unit(3, "mm"),
+    
     plot.margin = margin(
-      t = 5.5,
-      r = 20,
-      b = 5.5,
-      l = 5.5,
+      t = 3,
+      r = 8,
+      b = 3,
+      l = 3,
       unit = "pt"
     )
   )
 
-# = Save
-ggsave(filename = "outputs/range_size_by_solution.png", 
-       plot = range_size_by_solution, width = 8, height = 10)
+ggsave(
+  filename = "outputs/Fig6_range_size_by_solution.pdf",
+  plot = range_size_by_solution,
+  device = cairo_pdf,
+  width = 88,
+  height = 110,
+  units = "mm",
+  bg = "white"
+)
 
+ggsave(
+  filename = "outputs/Fig6_range_size_by_solution.png",
+  plot = range_size_by_solution,
+  width = 88,
+  height = 110,
+  units = "mm",
+  dpi = 300,
+  bg = "white"
+)
 
 
 #------------------------------------------------------------------------------#
