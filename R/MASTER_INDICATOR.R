@@ -97,15 +97,17 @@ gb <- st_read(file.path(shStdDat, "gb_mlwm_boundary.gpkg"))
 
 # = Load and process
 GB10km <- st_read("outputs/GB10km.gpkg")
-eng10km2 <- GB10km |>
-  filter(CTRY22NM == "England") |>
-  st_make_valid() |>
-  st_collection_extract("POLYGON") |>
-  st_cast("MULTIPOLYGON") |>
-  group_by(os_gridref) |>
-  summarise(.groups = "drop") |>
-  select(os_gridref) |>
-  mutate(area = as.numeric(st_area(geom)))
+# eng10km2 <- GB10km |>
+#   filter(CTRY22NM == "England") |>
+#   st_make_valid() |>
+#   st_collection_extract("POLYGON") |>
+#   st_cast("MULTIPOLYGON") |>
+#   group_by(os_gridref) |>
+#   summarise(.groups = "drop") |>
+#   select(os_gridref) |>
+#   mutate(area = as.numeric(st_area(geom)))
+# st_write(eng10km2, "data/eng10km2.gpkg")
+eng10km2 <- st_read("data/eng10km2.gpkg")
 
 # === Total area km2 ===
 total_area <- sum(eng10km2$area) / 1e+06
@@ -715,6 +717,7 @@ optimisation_data <- list(
 )
 saveRDS(optimisation_data, file = "outputs/optimisation_data.rds")
 
+
 #==============================================================================#
 # Analysis - optimisation
 #==============================================================================#
@@ -724,14 +727,6 @@ saveRDS(optimisation_data, file = "outputs/optimisation_data.rds")
 
 # === Load optimisation data ===
 optimisation_data <- readRDS("outputs/optimisation_data.rds")
-
-# = SAVE FOR FIGSHARE = #
-
-# = Save asai_cxs_eng
-fwrite(optimisation_data$asai_cxs_eng, "outputs/FigShareDat/asai_species_occurrence_england.csv")
-
-# = Save prop_suit_cs
-fwrite(optimisation_data$prop_suit_cs, "outputs/FigShareDat/proportion_suitable_habitat_england.csv")
 
 # === os_gridref_inc ===
 os_gridref_inc <- optimisation_data$asai_cxs_eng$os_gridref
@@ -798,6 +793,70 @@ run_grid[, seed := 10000L +
 output_dir <- "outputs/pareto_sensitivity"
 
 dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+
+
+# ====
+# == Archive optimisation inputs
+# ===
+
+archive_dir <- "outputs/FigShareDat"
+dir.create(archive_dir, recursive = TRUE, showWarnings = FALSE)
+
+optimisation_inputs <- list(
+  
+  # Normalised habitat-weighted occupancy matrix
+  P_over_R = optimisation_data$P_over_R,
+  
+  # Planning-unit identity and actual land area
+  os_gridref = optimisation_data$asai_cxs_eng$os_gridref,
+  area_km2 = area_km2,
+  cost_bound_adj = cost_bound_adj,
+  
+  # Species identities
+  species_names = colnames(optimisation_data$P_over_R),
+  
+  # Total planning area
+  total_area = total_area,
+  
+  # Model parameters
+  beta = 1,
+  GM_target = log(1.10),
+  K_seq = K_seq,
+  
+  # Search parameters
+  scenarios = scenarios,
+  run_grid = run_grid,
+  
+  # Shared optimisation controls
+  overshoot_lambda = 0.25,
+  randomise_within_cost_prune = TRUE,
+  eta = 1
+)
+
+# Check dimensions and ordering
+stopifnot(
+  length(optimisation_inputs$os_gridref) ==
+    nrow(optimisation_inputs$P_over_R),
+  
+  length(optimisation_inputs$area_km2) ==
+    nrow(optimisation_inputs$P_over_R),
+  
+  length(optimisation_inputs$species_names) ==
+    ncol(optimisation_inputs$P_over_R),
+  
+  !anyDuplicated(optimisation_inputs$os_gridref),
+  
+  all(is.finite(optimisation_inputs$P_over_R)),
+  
+  all(is.finite(optimisation_inputs$cost_bound_adj))
+)
+
+saveRDS(
+  optimisation_inputs,
+  file.path(archive_dir, "optimisation_inputs.rds"),
+  compress = "xz"
+)
 
 # === Identify runs that are not yet completed
 run_grid[, out_file := file.path(
@@ -924,32 +983,29 @@ future::plan(future::sequential)
 # === Optimisation data
 # ====
 
-# Load data
-optimisation_data <-readRDS("outputs/optimisation_data.rds")
+# Output of archive data
+archive_dir <- "outputs/FigShareDat"
 
 # Results output directory
 output_dir <- "outputs/pareto_sensitivity"
 
+# Load data
+optimisation_data <- readRDS(file.path(archive_dir, "optimisation_inputs.rds"))
+
 # Number of cells
-nC <- optimisation_data$nC
+nC <- length(optimisation_data$os_gridref)
 
 # Number of species
-nS <- optimisation_data$nS
+nS <- length(optimisation_data$species_names)
 
-# Species presence absence
-asai_cxs_eng <- optimisation_data$asai_cxs_eng
-
-# Proportion of cell suitable for each species
-prop_suit_cs <- optimisation_data$prop_suit_cs
-
-# Normalised weights
-P_over_R <- optimisation_data$P_over_R
+# OS gridref
+os_gridref <- optimisation_data$os_gridref
 
 # Species names
-species_names <- gsub("_", " ", names(asai_cxs_eng)[2:ncol(asai_cxs_eng)])
+species_names <- gsub("_", " ", optimisation_data$species_names)
 
 # Area
-area_km2 <- cellXarea$area[which(cellXarea$os_gridref %in% asai_cxs_eng$os_gridref)]
+area_km2 <- optimisation_data$area_km2
 
 # === For plotting, crop GB map
 gb_eng_crop <- st_crop(gb, eng10km2)
@@ -958,12 +1014,10 @@ eng_only <- gb[gb$CTRY22NM == "England",]
 # === Biogeographic zones
 bio_geo_zone_bd <- st_read("data/Biogeographic_Zones_Living_England_2021.gpkg")
 bio_geo_zone <- st_intersection(eng10km2, bio_geo_zone_bd)
-plot(bio_geo_zone[,3])
 
 # === Load spatial protected area data
 NP <- st_read("data/National_Parks_England.gpkg") |> 
   st_union()
-sum(NP$MEASURE)
 
 # === Load spatial protected area data
 SSSI <- st_read("data/SSSI_England.gpkg") |> 
@@ -1176,8 +1230,9 @@ min_footprint_beta1
 best_solution_constructed[[1]]$best_state$N10 / nS
 # 0.5170358%
 
-# Percentage of species +5% or more
-length(which(best_solution_constructed[[1]]$best_state$m_s >= 1.05)) / nS
+# Percentage of species +7.5% or more
+length(which(best_solution_constructed[[1]]$best_state$m_s >= 1.075)) / nS
+hist(best_solution_constructed[[1]]$best_state$m_s, breaks = 100)
 
 # == N10 == 100%
 full_K_solution <- best_solution_constructed[[length(best_solution_constructed)]]
@@ -1233,7 +1288,7 @@ deriv_summary_85 <- deriv_df |>
 K0_solution <- best_solution_constructed[[1]]$best_state$x
 
 # = Convert to sf
-unconst_footprint <- cbind(asai_cxs_eng[, 1], footprint = K0_solution)
+unconst_footprint <- data.frame(os_gridref = os_gridref, footprint = K0_solution)
 unconst_footprint_sf <- left_join(eng10km2, unconst_footprint, by = join_by(os_gridref)) %>%
   mutate(footprint = factor(footprint)) %>%
   filter(!is.na(footprint))
@@ -1349,7 +1404,7 @@ best_85pc_ind <- which_best_85pc[which_best_85pc$N10 == nSp85,]
 N10_85_solution <- best_solution_constructed[[best_85pc_ind$x]]$best_state$x
 
 # = Convert to sf
-pc85_footprint <- cbind(asai_cxs_eng[, 1], footprint = N10_85_solution)
+pc85_footprint <- data.frame(os_gridref = os_gridref, footprint = N10_85_solution)
 pc85_footprint_sf <- left_join(eng10km2, pc85_footprint, by = join_by(os_gridref)) %>%
   mutate(footprint = factor(footprint)) %>%
   filter(!is.na(footprint))
@@ -1419,7 +1474,7 @@ pc85_footprint_sol <-
 N10_100_solution <- best_solution_constructed[[length(best_solution_constructed)]]$best_state$x
 
 # = Convert to sf
-pc100_footprint <- cbind(asai_cxs_eng[, 1], footprint = N10_100_solution)
+pc100_footprint <- data.frame(os_gridref = os_gridref, footprint = N10_100_solution)
 pc100_footprint_sf <- left_join(eng10km2, pc100_footprint, by = join_by(os_gridref)) %>%
   mutate(footprint = factor(footprint)) %>%
   filter(!is.na(footprint))
@@ -1573,7 +1628,7 @@ footprint_per_zone <- lapply(c(seq(1, l, 10), l), function(i) {
   best_area_actual_size <- sum(tmp * area_km2, na.rm = TRUE)
   
   # Intersect with biogeographic zones
-  tmp <- cbind(asai_cxs_eng[, 1], footprint = tmp)
+  tmp <- data.frame(os_gridref = os_gridref, footprint = tmp)
   
   tmp_sf <- left_join(bio_geo_zone, tmp, by = join_by(os_gridref)) %>% 
     st_drop_geometry()
@@ -1864,7 +1919,7 @@ selection_by_cell <- lapply(seq_len(l), function(x) {
 })
 selection_by_cell <- do.call(cbind, selection_by_cell)
 selection_by_cell <- rowSums(selection_by_cell)
-selection_by_cell_df <- data.frame(os_gridref = os_gridref_inc,
+selection_by_cell_df <- data.frame(os_gridref = os_gridref,
                                    selection_count = selection_by_cell)
 selection_by_cell_df$selection_freq <- round(selection_by_cell_df$selection_count / l, 4) *100
 selection_freq_sf <- left_join(eng10km2, selection_by_cell_df)
@@ -2377,9 +2432,6 @@ ggsave(
 
 # Look at the traits associated with species selected early vs late
 
-# === Species names
-species_names <- gsub("_", " ", colnames(optimisation_data$P_over_R))
-
 # === Re-load compiled data
 asai_info_compiled <- fread("outputs/bdi_asai_compiled_species_information.csv")
 asai_info_compiled_1174 <- asai_info_compiled[asai_info_compiled$BDI_NAME_CHECK %in% species_names, ]
@@ -2561,324 +2613,6 @@ data.frame(
 # 85% species targets
 # threshold observed_n_small expected_n_small observed_proportion expected_proportion    p_value
 # 1019.405        112           100.52           0.1122244           0.1007214         0.00990099
-
-# === Create range size histogram
-range_plot_data <- data.frame(
-  range_size = c(
-    unconstrained_ranges,
-    sol85_ranges,
-    range_size$range_size
-  ),
-  type = rep(
-    c("GM target only (unconstrained)", 
-      "GM target & 85% species reaching +10% abundance target",
-      "GM target & 100% species reaching +10% abundance target"),
-    c(length(unconstrained_ranges), length(sol85_ranges), nrow(range_size))
-  )
-)
-
-# Facet
-range_size_by_solution <- ggplot(
-  range_plot_data,
-  aes(
-    x = range_size,
-    fill = type
-  )
-) +
-  geom_histogram(
-    bins = 100,
-    alpha = 0.8,
-    colour = "white",
-    linewidth = 0.08
-  ) +
-  facet_wrap(
-    ~type,
-    ncol = 1,
-    scales = "free_y",
-    labeller = labeller(
-      type = label_wrap_gen(width = 70)
-    )
-  ) +
-  scale_x_continuous(
-    breaks = scales::breaks_extended(n = 4),
-    labels = scales::label_comma(accuracy = 1),
-    expand = expansion(mult = c(0, 0.02))
-  ) +
-  scale_fill_manual(
-    values = solution_cols,
-    breaks = rev(solution_levels),
-    drop = FALSE,
-    guide = guide_legend(
-      reverse = TRUE,
-      ncol = 1,
-      byrow = TRUE
-    )
-  ) +
-  labs(
-    x = expression("Range size (km"^2 * ")"),
-    y = "Number of species"
-  ) +
-  guides(fill = "none") +
-  theme_bw(
-    base_size = 7,
-    base_family = "Arial"
-  ) +
-  theme(
-    axis.title = element_text(size = 7),
-    axis.title.x = element_text(
-      margin = margin(t = 3, unit = "pt")
-    ),
-    axis.title.y = element_text(
-      margin = margin(r = 3, unit = "pt")
-    ),
-    axis.text = element_text(
-      size = 6,
-      colour = "black"
-    ),
-    
-    axis.ticks = element_line(linewidth = 0.18),
-    axis.ticks.length = grid::unit(1.5, "mm"),
-    
-    strip.background = element_blank(),
-    strip.text = element_text(
-      size = 6,
-      face = "bold",
-      hjust = 0,
-      lineheight = 0.9,
-      margin = margin(
-        t = 2,
-        r = 0,
-        b = 2,
-        l = 0,
-        unit = "pt"
-      )
-    ),
-    
-    panel.border = element_rect(
-      colour = "black",
-      linewidth = 0.18
-    ),
-    panel.grid.major = element_line(
-      colour = "grey88",
-      linewidth = 0.12
-    ),
-    panel.grid.minor = element_blank(),
-    
-    panel.spacing.y = grid::unit(3, "mm"),
-    
-    plot.margin = margin(
-      t = 3,
-      r = 8,
-      b = 3,
-      l = 3,
-      unit = "pt"
-    )
-  )
-
-ggsave(
-  filename = "outputs/Fig6_range_size_by_solution.pdf",
-  plot = range_size_by_solution,
-  device = cairo_pdf,
-  width = 88,
-  height = 110,
-  units = "mm",
-  bg = "white"
-)
-
-ggsave(
-  filename = "outputs/Fig6_range_size_by_solution.png",
-  plot = range_size_by_solution,
-  width = 88,
-  height = 110,
-  units = "mm",
-  dpi = 300,
-  bg = "white"
-)
-
-
-#------------------------------------------------------------------------------#
-#----------------------------------END-----------------------------------------#
-#------------------------------------------------------------------------------## ====
-# === Species traits associated with selection
-# ====
-
-# Look at the traits associated with species selected early vs late
-
-# === Species names
-species_names <- gsub("_", " ", colnames(optimisation_data$P_over_R))
-
-# === Re-load compiled data
-asai_info_compiled <- fread("outputs/bdi_asai_compiled_species_information.csv")
-asai_info_compiled_1174 <- asai_info_compiled[asai_info_compiled$BDI_NAME_CHECK %in% species_names, ]
-
-# === Complete missing CLASS assignments
-# Fish - Actinopterygii
-asai_info_compiled_1174$CLASS[asai_info_compiled_1174$ORDER %in% c(
-  "Anguilliformes", "Atheriniformes", "Clupeiformes", "Cypriniformes", "Esociformes",
-  "Gasterosteiformes", "Mugiliformes", "Osmeriformes", "Perciformes",
-  "Pleuronectiformes", "Salmoniformes", "Scorpaeniformes", "Syngnathiformes"
-  )] <- "Actinopterygii"
-
-asai_info_compiled_1174$CLASS[asai_info_compiled_1174$SCIENTIFIC_NAME %in% c(
-  "Gymnocephalus cernuus", "Liza aurata", "Liza ramada"
-  )] <- "Actinopterygii"
-
-# Tubular worm
-asai_info_compiled_1174$CLASS[asai_info_compiled_1174$ORDER %in% c("Tricladida")]  <-"Turbellaria"
-
-# === Create plot of inclusion by class and K10 target
-
-# = Find the N10 ranking for each list element
-N10_list_index <- unlist(lapply(1:length(pareto_front_on_K_b1_e1), function(i) {
-  pareto_front_on_K_b1_e1[[i]]$best_state$N10
-}))
-
-# = Add progressive targets to data.table
-add_progressive_targets(
-  asai_info_compiled = asai_info_compiled_1174,
-  pareto_front_on_K = pareto_front_on_K_b1_e1,
-  N10_list_index = N10_list_index,
-  species_names = species_names
-)
-
-# = Create figure
-prog_N10_class_plot <- plot_progressive_taxon_stack(
-  asai_info_compiled_1174,
-  taxon_col = "CLASS"
-)
-ggsave("outputs/progressive_N10_by_class.png", 
-       plot = prog_N10_class_plot, 
-       width = 8, height = 7)
-
-# = Table for statistics
-prog_N10_class_table <- plot_progressive_taxon_stack(
-  asai_info_compiled_1174,
-  taxon_col =   c("CLASS"),
-  return_dt = TRUE
-)
-
-# = Target N30 taxon representation
-prog_N10_class_table[,
-  prop := N / sum(N), by = first_included][, 
-  total_class_n := as.integer(sub(".*\\(([0-9]+)\\)$", "\\1", 
-                                  as.character(taxon_label)))
-  ][
-    , prop_expect := total_class_n / 1174
-  ][
-    , delta_expect := (prop - prop_expect) 
-  ][first_included == "N_30"]
-
-# = Split taxon_label into CLASS, DOMAIN, and taxon_n
-class_by_domain_by_N10 <- copy(prog_N10_class_table)
-class_by_domain_by_N10[, c("CLASS", "domain_with_n") := tstrsplit(as.character(taxon_label)," \\| ")
-   ][,DOMAIN := sub(" \\([0-9]+\\)$", "", domain_with_n)
-     ][, taxon_n := as.integer(sub(".*\\(([0-9]+)\\)$", "\\1", domain_with_n))
-       ][,domain_with_n := NULL]
-
-# Count species per first_included class per DOMAIN
-domain_first_included_summary <- class_by_domain_by_N10[,.(N = sum(N)), by = .(DOMAIN, first_included)]
-
-# === Calculate proportion within each DOMAIN
-domain_first_included_summary[,prop := N / sum(N), by = first_included]
-
-# = N30 
-n30_non_terrestrial <- domain_first_included_summary[first_included == "N_30" & 
-                                !(DOMAIN %in% c("Terrestrial", "Mixed/Other"))]
-sum(n30_non_terrestrial$N)/nS
-# 47.96% of species select by n30 associated with Freshwater, marine, intertidal
-# vs. 
-
-# = Total domain counts / proportions
-domain_proportions <- asai_info_compiled_1174 %>% 
-  group_by(DOMAIN) %>% 
-  summarise(N = n())
-
-# Non-terrestrial
-non_terr <- domain_proportions %>% 
-  filter(!(DOMAIN %in% c("Terrestrial", "Mixed/Other")))
-sum(non_terr$N) / nS
-# 29.39% of the full species list
-
-# ===
-# == Range size by scenario
-# ===
-
-# === Load ranges
-range_size <- fread("outputs/range_sizes.csv")
-
-# == Unconstrained solution ranges
-unconstrained_ranges <-
-  range_size$range_size[which(pareto_front_on_K_b1_e1[[1]]$best_state$m_s >= 1.1)]
-summary(unconstrained_ranges)
-# Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
-# 4.578  3004.536  8438.707  7443.045 11299.746 19708.577 
-
-# == 85% species representation
-sol85_ranges <-
-  range_size$range_size[which(pareto_front_on_K_b1_e1[[best_85pc_ind$x]]$best_state$m_s >= 1.1)]
-summary(sol85_ranges)
-# Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
-# 4.578  2827.642  6714.096  7558.253 10607.182 50484.072 
-
-# == 100% species representation
-summary(range_size$range_size)
-# Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
-# 1.390e-01 3.187e+03 7.255e+03 1.471e+04 1.195e+04 1.203e+05 
-
-
-# Number of species with large ranges than the largest in the unconstrainted solution
-sum(range_size$range_size > 19708.577)
-
-# == Test the expectation of inclusion for small range species 
-# Use a permutation test to test the observed against expected inclusion of
-# species with the smallest ranges (lowest 10%).
-
-# Just for repeatability
-set.seed(123)
-
-# Set pools
-selected_ranges <- unconstrained_ranges
-pool_ranges     <- range_size$range_size
-n_selected <- length(selected_ranges)
-
-# Set smallest 10% of ranges
-small_range_threshold <- quantile(
-  pool_ranges,
-  probs = 0.1,
-  na.rm = TRUE
-)
-
-# Observed number with <= 10% range size
-observed_n_small <- sum(selected_ranges <= small_range_threshold)
-
-# Permutation selection of observed_n_small
-n_iter = 100
-null_n_small <- replicate(
-  n_iter,
-  {
-    random_sample <- sample(
-      pool_ranges,
-      size = n_selected,
-      replace = FALSE
-    )
-    
-    sum(random_sample <= small_range_threshold)
-  }
-)
-
-# P-value for this sample
-p_value_small <- (
-  sum(null_n_small >= observed_n_small) + 1
-) / (n_iter + 1)
-
-data.frame(
-  threshold = small_range_threshold,
-  observed_n_small = observed_n_small,
-  expected_n_small = mean(null_n_small),
-  observed_proportion = observed_n_small / n_selected,
-  expected_proportion = mean(null_n_small) / n_selected,
-  p_value = p_value_small
-)
 
 # === Create range size histogram
 range_plot_data <- data.frame(
