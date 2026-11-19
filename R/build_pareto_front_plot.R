@@ -115,8 +115,6 @@ build_pareto_front_plot <- function(pareto_front_on_K) {
   # instead the N10 value is the definitive number of species meeting the +10%
   # target.
   
-  summary(pareto_statistics)
-  
   # = Get unique N10 lowest area footprint
   pareto_by_N10 <- pareto_statistics %>% 
     dplyr::group_by(N10) %>% 
@@ -129,7 +127,10 @@ build_pareto_front_plot <- function(pareto_front_on_K) {
   # small inefficiencies. Obviously, running the optimisation longer might find a
   # more efficient solution to the earlier N10, but in trials it took a long time
   # and made no real difference to the overall pattern of the pareto front.
-  pareto_by_N10$footprint_monotone <- cummax(pareto_by_N10$best_footprint_area_km)
+  pareto_by_N10$footprint_monotone <-
+    rev(cummin(rev(
+      pareto_by_N10$best_footprint_area_km
+    )))
   
   # ===
   # === Plot Pareto front - minimum footprint vs N10 (minimising D)

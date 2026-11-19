@@ -55,7 +55,7 @@ shStdDat <- file.path(sysPath, "RENEW/AA_RENEW_STANDARD_PRODUCTS/outputs")
 shareDir <- file.path(sysPath,"RENEW/renew_data/")
 
 # === Load packages ===
-library(renewTools)
+#library(renewTools)
 library(dplyr)
 library(sf)
 library(tidyr)
@@ -733,18 +733,24 @@ fwrite(optimisation_data$asai_cxs_eng, "outputs/FigShareDat/asai_species_occurre
 # = Save prop_suit_cs
 fwrite(optimisation_data$prop_suit_cs, "outputs/FigShareDat/proportion_suitable_habitat_england.csv")
 
-# ====================== #
-
 # === os_gridref_inc ===
 os_gridref_inc <- optimisation_data$asai_cxs_eng$os_gridref
 
 # === GM targets ===
 g    <- 0.10  # target +10% increase in the indicator
-beta <- 0.5   # max proportional increase if full range treated 
+beta <- 1   # max proportional increase if full range treated 
 GM_target <- log(1 + g)
 
 # === K sequence search ===
 K_seq <- seq(0, optimisation_data$nS, by = 1)
+
+# === Area
+area_km2 <- cellXarea$area[
+  match(
+    os_gridref_inc,
+    cellXarea$os_gridref
+  )
+]
 
 # === Costs with boundary adjustment ===
 # Need boundary adjustments on costs as otherwise partial cells around the
@@ -759,23 +765,124 @@ cost_bound_adj <- make_boundary_adjusted_cost(
 # === Solve Pareto front for incrementally higher K = species +10%
 # ====
 
-pareto_front_on_K <- solve_pareto_front_incremental(
-  P_over_R = optimisation_data$P_over_R,
-  beta = beta,
-  GM_target = GM_target,
-  K_seq = K_seq,
-  cost = cost_bound_adj,
-  randomise_within_cost_prune = TRUE,
-  top_species = 25,
-  beam_width = 8,
-  max_depth = 5,
-  top_expand = 8,
-  overshoot_lambda = 0.25,
-  verbose = TRUE
+# === Scenario configurations
+scenarios <- data.table(
+  scenario = c(
+    "baseline",
+    "more_species",
+    "wider_beam",
+    "deeper_search",
+    "more_cells",
+    "expanded_search"
+  ),
+  top_species = c(25L, 50L, 25L, 25L, 25L, 50L),
+  beam_width  = c(8L, 8L, 16L, 8L, 8L, 16L),
+  max_depth   = c(5L, 5L, 5L, 8L, 5L, 8L),
+  top_expand  = c(8L, 8L, 8L, 8L, 16L, 16L)
 )
 
-# === Save ===
-saveRDS(pareto_front_on_K, "outputs/pareto_front_on_K_0_to_1174_by_1_beta1_costEta1.rds")
+# === Expand to 10 replicates per configuration
+run_grid <- scenarios[
+  , .(rep = seq_len(10L)),
+  by = .(scenario, top_species, beam_width,
+         max_depth, top_expand)
+]
+
+run_grid[, run_id := sprintf("%s_rep_%02d", scenario, rep)]
+
+# Stable, distinct seed for each scenario-replicate combination
+run_grid[, seed := 10000L +
+           match(scenario, scenarios$scenario) * 1000L + rep]
+
+# === Output directory: same as previous runs
+output_dir <- "outputs/pareto_sensitivity"
+
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+# === Identify runs that are not yet completed
+run_grid[, out_file := file.path(
+  output_dir,
+  paste0("pareto_", run_id, ".rds")
+)]
+
+pending <- run_grid[!file.exists(out_file)]
+
+cat("Total runs:", nrow(run_grid), "\n")
+cat("Pending runs:", nrow(pending), "\n")
+
+# === Parallel setup
+future::plan(
+  future::multisession,
+  workers = 30
+)
+
+# === Run pending optimisations
+run_log <- future.apply::future_lapply(
+  seq_len(nrow(pending)),
+  function(i) {
+    
+    pars <- pending[i]
+    t0 <- Sys.time()
+    
+    tryCatch({
+      
+      set.seed(pars$seed)
+      
+      pareto <- solve_pareto_front_incremental(
+        P_over_R = optimisation_data$P_over_R,
+        beta = 1,
+        GM_target = log(1.10),
+        K_seq = K_seq,
+        cost = cost_bound_adj,
+        randomise_within_cost_prune = TRUE,
+        top_species = pars$top_species,
+        beam_width = pars$beam_width,
+        max_depth = pars$max_depth,
+        top_expand = pars$top_expand,
+        overshoot_lambda = 0.25,
+        verbose = FALSE
+      )
+      
+      # Save to temporary file, then move into place
+      tmp_file <- paste0(pars$out_file, ".tmp")
+      
+      saveRDS(
+        list(
+          run_id = pars$run_id,
+          parameters = as.list(pars),
+          beta = 1,
+          seed = pars$seed,
+          pareto = pareto
+        ),
+        tmp_file
+      )
+      
+      if (!file.rename(tmp_file, pars$out_file)) {
+        stop("Could not finalise output file")
+      }
+      
+      data.table(
+        run_id = pars$run_id,
+        status = "completed",
+        elapsed_sec = as.numeric(
+          difftime(Sys.time(), t0, units = "secs")
+        )
+      )
+      
+    }, error = function(e) {
+      
+      data.table(
+        run_id = pars$run_id,
+        status = paste("failed:", conditionMessage(e)),
+        elapsed_sec = as.numeric(
+          difftime(Sys.time(), t0, units = "secs")
+        )
+      )
+    })
+  },
+  future.seed = TRUE
+)
+future::plan(future::sequential)
 
 
 #==============================================================================#
@@ -799,12 +906,16 @@ saveRDS(pareto_front_on_K, "outputs/pareto_front_on_K_0_to_1174_by_1_beta1_costE
 #    Summary statistics:
 #    * Spatial analysis of regional representation, habitat representation 
 #
-# 3) Figure showing range size of species vs proportion of range selected across pareto front
+# 3) Figure showing regional representation and frequency of selection of cells
+#
+# 4) Figure showing the habitat selection
+#
+# 5) Figure showing range size of species vs proportion of range selected across pareto front
 #
 #    Summary statistics: 
 #    * Summary statistics at GM-constraint only, N85, N100
 #
-# 4) Figure showing representation by taxonomic group across pareto front
+# 6) Figure showing representation by taxonomic group across pareto front
 #
 #    Summary statistics: 
 #    * Summary statistics at GM-constraint only, N85, N100
@@ -815,6 +926,9 @@ saveRDS(pareto_front_on_K, "outputs/pareto_front_on_K_0_to_1174_by_1_beta1_costE
 
 # Load data
 optimisation_data <-readRDS("outputs/optimisation_data.rds")
+
+# Results output directory
+output_dir <- "outputs/pareto_sensitivity"
 
 # Number of cells
 nC <- optimisation_data$nC
@@ -836,6 +950,28 @@ species_names <- gsub("_", " ", names(asai_cxs_eng)[2:ncol(asai_cxs_eng)])
 
 # Area
 area_km2 <- cellXarea$area[which(cellXarea$os_gridref %in% asai_cxs_eng$os_gridref)]
+
+# === For plotting, crop GB map
+gb_eng_crop <- st_crop(gb, eng10km2)
+eng_only <- gb[gb$CTRY22NM == "England",]
+
+# === Biogeographic zones
+bio_geo_zone_bd <- st_read("data/Biogeographic_Zones_Living_England_2021.gpkg")
+bio_geo_zone <- st_intersection(eng10km2, bio_geo_zone_bd)
+plot(bio_geo_zone[,3])
+
+# === Load spatial protected area data
+NP <- st_read("data/National_Parks_England.gpkg") |> 
+  st_union()
+sum(NP$MEASURE)
+
+# === Load spatial protected area data
+SSSI <- st_read("data/SSSI_England.gpkg") |> 
+  st_union()
+
+# === Load spatial protected area data
+NL <- st_read("data/Areas_of_Outstanding_Natural_Beauty_England.gpkg") |> 
+  st_union()
 
 # === Nature figure styling ===
 
@@ -916,15 +1052,95 @@ solution_cols <- setNames(
   solution_levels
 )
 
-# ====
-# === Build pareto front (beta = 1 and eta = 1) - FIGURE 1
-# ====
+# === Extract pareto frontier solutions i = runs[1]
+runs <- list.files(output_dir, pattern = ".rds")
+pareto_runs <- lapply(runs, function(i) {
+  
+  # Load run
+  run_i_f <- file.path(output_dir, i)
+  run_i <- readRDS(run_i_f)
+  pareto_front_on_K <- run_i$pareto
+  
+  # Build plot
+  pareto_statistics <- lapply(1:length(pareto_front_on_K), function(i) {
+    print(i)
+    
+    tmp <- pareto_front_on_K[[i]]
+    beta <- tmp$best_state$beta
+    
+    # Map to actual area because best assumes equal cost for partial cells
+    best_area_actual_size <- sum(tmp$best_state$x * area_km2)
+    
+    # State statistics
+    state_i <- compute_state_fast(tmp[[2]])
+    
+    # Output summary
+    data.frame(
+      K_target = tmp$K,
+      beta = beta,
+      N10 = state_i$N10,
+      best_footprint_10km = tmp$best_n_cells,
+      best_footprint_area_km = best_area_actual_size,
+      gm_pct = state_i$gm_pct,
+      gm_log = state_i$gm_log,
+      U = state_i$U,
+      D = round(state_i$D, 4) # handle floating point issue
+    )
+  })
+  pareto_statistics <- do.call(rbind, pareto_statistics)
+  pareto_statistics$N10pc <- pareto_statistics$N10 / nS
+  pareto_statistics$run <- i
+  
+  # The K_target might not necessarily be possible (or found) so the N10 and
+  # K_target values could differ. Therefore, The K_target is not used, and
+  # instead the N10 value is the definitive number of species meeting the +10%
+  # target.
+  
+  # = Get unique N10 lowest area footprint
+  pareto_by_N10 <- pareto_statistics %>%
+    dplyr::group_by(N10) %>%
+    dplyr::slice_min(best_footprint_area_km, n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::arrange(N10)
+  
+} )
+pareto_runs <- do.call(rbind, pareto_runs)
 
-# Load optimisation results
-pareto_front_on_K_b1_e1 <- readRDS("outputs/pareto_front_on_K_0_to_1174_by_1_beta1_costEta1.rds")
+# === Identify minimum footprint per N10
+min_footprint_K_target <- 
+  pareto_runs$K_target[which(pareto_runs$best_footprint_area_km == min(pareto_runs$best_footprint_area_km))]
+pareto_by_N10 <- pareto_runs %>% 
+  filter(K_target >= min_footprint_K_target) %>% 
+  group_by(N10) %>% 
+  slice_min(best_footprint_area_km, with_ties = FALSE)
+
+# === Construct best solution chain x = 2
+best_solution_constructed <- lapply(seq_len(nrow(pareto_by_N10)), function(x) {
+  
+  # file path to solution
+  run <- pareto_by_N10$run[x]
+  K_target  <- pareto_by_N10$K_target[x]
+  sol_path <- file.path(output_dir, run)
+  
+  # Load solution
+  sol_x <- readRDS(sol_path)$pareto
+  
+  # Find K target
+  l <- length(sol_x)
+  ks <- sapply(seq_len(l), function(i) sol_x[[i]]$K)
+  k_ind <- which(ks == K_target)
+  
+  # Extract solution
+  sol_x_K <- sol_x[[k_ind]]
+  
+})
+
+# ------------------------------------------------------------------------------
+# Figure 1 - Build Pareto front (beta = 1 and eta = 1) - FIGURE 1
+# ------------------------------------------------------------------------------
 
 # Build plot
-pareto_plot_b1_e1 <- build_pareto_front_plot(pareto_front_on_K_b1_e1)
+pareto_plot_b1_e1 <- build_pareto_front_plot(best_solution_constructed)
 
 # Save as pdf and png
 ggsave(
@@ -950,27 +1166,26 @@ ggsave(
 # === Extract summary statistics for N10s
 
 # == Unconstrained 
-min_footprint_beta1 <- sum(pareto_front_on_K_b1_e1[[1]]$best_state$x * area_km2)
+min_footprint_beta1 <- sum(best_solution_constructed[[1]]$best_state$x * area_km2)
 min_footprint_beta1 
-# 6697.649km2
+# 6526.884km2
 (min_footprint_beta1  / total_area) * 100
-# 5.0385%
+# 4.910018%
 
 # Percentage of species min footprint
-pareto_front_on_K_b1_e1[[1]]$best_state$N10 / nS
-#  0.4795571%
+best_solution_constructed[[1]]$best_state$N10 / nS
+# 0.5170358%
 
 # Percentage of species +5% or more
-length(which(pareto_front_on_K_b1_e1[[1]]$best_state$m_s >= 1.05)) / nS
+length(which(best_solution_constructed[[1]]$best_state$m_s >= 1.05)) / nS
 
 # == N10 == 100%
-full_K_solution <- pareto_front_on_K_b1_e1[[length(pareto_front_on_K_b1_e1)]]
+full_K_solution <- best_solution_constructed[[length(best_solution_constructed)]]
 max_N10_footprint_beta1 <- sum(full_K_solution$best_state$x * area_km2)
 max_N10_footprint_beta1 
-# 13828.09 km2
+# 13807.08 km2
 (max_N10_footprint_beta1  / total_area) * 100
-# 10.40254%
-
+# 10.38673%
 
 # == Marginal gain as the additional species reaching +10% per extra area
 # species_per_100km2_effective_footprint
@@ -1000,37 +1215,341 @@ deriv_summary_85 <- deriv_df |>
     max_species_per_100km2 = max(species_per_100km2, na.rm = TRUE)
   )
 
-# ====
-# === 2) Plot minimal footprints at different N10 - FIGURE 3
-# ====
+
+# ------------------------------------------------------------------------------
+# Figure 2 - Plot minimal footprints at different N10
+# ------------------------------------------------------------------------------
 
 # We want to show how the spatial pattern of the footprint changes as you enforce
 # N10 targets. To do this, plot the minimal spatial footprint (unconstrained) 
 # and the footprint for N10 = 1174, and also a heat map of the frequency of selection.
 # Also, add the 85%
 
-# === For plotting, crop GB map
-gb_eng_crop <- st_crop(gb, eng10km2)
-eng_only <- gb[gb$CTRY22NM == "England",]
+# === 
+# === Uncontrained (K_target = 0)
+# ===
 
-# === Biogeographic zones
-bio_geo_zone_bd <- st_read("data/Biogeographic_Zones_Living_England_2021.gpkg")
-bio_geo_zone <- st_intersection(eng10km2, bio_geo_zone_bd)
-plot(bio_geo_zone[,3])
+# = Get the K_target = 0 solution
+K0_solution <- best_solution_constructed[[1]]$best_state$x
 
-# === Load spatial protected area data
-NP <- st_read("data/National_Parks_England.gpkg")
-sum(NP$MEASURE)
+# = Convert to sf
+unconst_footprint <- cbind(asai_cxs_eng[, 1], footprint = K0_solution)
+unconst_footprint_sf <- left_join(eng10km2, unconst_footprint, by = join_by(os_gridref)) %>%
+  mutate(footprint = factor(footprint)) %>%
+  filter(!is.na(footprint))
 
-# === Load spatial protected area data
-SSSI <- st_read("data/SSSI_England.gpkg")
+# = Create map of selected cells
+unconst_footprint_sol <-
+  ggplot(
+    unconst_footprint_sf[
+      unconst_footprint_sf$footprint == 1,
+    ]
+  ) +
+  geom_sf(data = gb_eng_crop, fill = "grey95") +
+  geom_sf(data = eng_only, fill = "grey80") +
+  geom_sf(
+    data = NP,
+    aes(fill = "National Parks"),
+    colour = NA,
+    alpha = 0.2
+  ) +
+  geom_sf(
+    data = NL,
+    aes(fill = "National Landscapes"),
+    colour = NA,
+    alpha = 0.2
+  ) +
+  geom_sf(
+    data = SSSI,
+    aes(fill = "Sites of Special Scientific Interest"),
+    colour = NA,
+    alpha = 0.5
+  ) +
+  geom_sf(
+    aes(fill = "Targeted grid cells"),
+    colour = NA
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    breaks = c(
+      "Targeted grid cells",
+      "National Parks",
+      "National Landscapes",
+      "Sites of Special Scientific Interest"
+    ),
+    values = c(
+      "Targeted grid cells" = "red",
+      "National Parks" = "forestgreen",
+      "National Landscapes" = "blue",
+      "Sites of Special Scientific Interest" = "orange"
+    ),
+    guide = guide_legend(
+      nrow = 1,
+      byrow = TRUE,
+      override.aes = list(
+        alpha = c(1, 0.5, 0.5, 0.7),
+        colour = NA
+      )
+    )
+  ) +
+  # Scale bar sized for a c. 60 mm-wide panel
+  annotation_scale(
+    location = "br",
+    width_hint = 0.28,
+    style = "ticks",
+    
+    line_width = 0.45,
+    line_col = "grey10",
+    text_col = "grey10",
+    
+    text_cex = 0.65,
+    text_family = nature_font,
+    
+    height = grid::unit(1.2, "mm"),
+    pad_x = grid::unit(2, "mm"),
+    pad_y = grid::unit(2, "mm"),
+    text_pad = grid::unit(1, "mm")
+  ) +
+  
+  # North arrow sized explicitly in physical units
+  annotation_north_arrow(
+    location = "tr",
+    height = grid::unit(8, "mm"),
+    width = grid::unit(8, "mm"),
+    pad_x = grid::unit(2, "mm"),
+    pad_y = grid::unit(2, "mm"),
+    style = north_arrow_orienteering(
+      line_width = 0.45,
+      line_col = "grey10",
+      text_col = "grey10",
+      text_family = nature_font,
+      text_size = 6
+    )
+  ) +
+  map_coord +
+  map_theme
 
-# === Load spatial protected area data
-NL <- st_read("data/Areas_of_Outstanding_Natural_Beauty_England.gpkg")
+# === 
+# === N10 = 85% 
+# ===
+
+# === Which is the best 85% solution
+which_best_85pc <- rbindlist(lapply(1:length(best_solution_constructed), function(x){
+  tmp <- best_solution_constructed[[x]]
+  data.frame(x = x, N10 = tmp$best_state$N10, best_area = tmp$best_area)
+}))
+
+# How many species is 85%
+nSp85 <- ceiling(nS*0.85)
+
+# Best index
+best_85pc_ind <- which_best_85pc[which_best_85pc$N10 == nSp85,]
+
+# === Get the N10 = 85% solution
+N10_85_solution <- best_solution_constructed[[best_85pc_ind$x]]$best_state$x
+
+# = Convert to sf
+pc85_footprint <- cbind(asai_cxs_eng[, 1], footprint = N10_85_solution)
+pc85_footprint_sf <- left_join(eng10km2, pc85_footprint, by = join_by(os_gridref)) %>%
+  mutate(footprint = factor(footprint)) %>%
+  filter(!is.na(footprint))
+
+# = Create map of selected cells
+pc85_footprint_sol <-
+  ggplot(
+    pc85_footprint_sf[
+      pc85_footprint_sf$footprint == 1,
+    ]
+  ) +
+  geom_sf(data = gb_eng_crop, fill = "grey95") +
+  geom_sf(data = eng_only, fill = "grey80") +
+  geom_sf(
+    data = NP,
+    aes(fill = "National Parks"),
+    colour = NA,
+    alpha = 0.2
+  ) +
+  geom_sf(
+    data = NL,
+    aes(fill = "National Landscapes"),
+    colour = NA,
+    alpha = 0.2
+  ) +
+  geom_sf(
+    data = SSSI,
+    aes(fill = "Sites of Special Scientific Interest"),
+    colour = NA,
+    alpha = 0.5
+  ) +
+  geom_sf(
+    aes(fill = "Targeted grid cells"),
+    colour = NA
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    breaks = c(
+      "Targeted grid cells",
+      "National Parks",
+      "National Landscapes",
+      "Sites of Special Scientific Interest"
+    ),
+    values = c(
+      "Targeted grid cells" = "red",
+      "National Parks" = "forestgreen",
+      "National Landscapes" = "blue",
+      "Sites of Special Scientific Interest" = "orange"
+    ),
+    guide = guide_legend(
+      nrow = 1,
+      byrow = TRUE,
+      override.aes = list(
+        alpha = c(1, 0.5, 0.5, 0.7),
+        colour = NA
+      )
+    )
+  ) +
+  map_coord +
+  map_theme
+
+# === 
+# === N10 = 1174
+# ===
+
+# = Get the K_target = 0 solution
+N10_100_solution <- best_solution_constructed[[length(best_solution_constructed)]]$best_state$x
+
+# = Convert to sf
+pc100_footprint <- cbind(asai_cxs_eng[, 1], footprint = N10_100_solution)
+pc100_footprint_sf <- left_join(eng10km2, pc100_footprint, by = join_by(os_gridref)) %>%
+  mutate(footprint = factor(footprint)) %>%
+  filter(!is.na(footprint))
+
+# = Create map of selected cells
+pc100_footprint_sol <-
+  ggplot(
+    pc100_footprint_sf[
+      pc100_footprint_sf$footprint == 1,
+    ]
+  ) +
+  geom_sf(data = gb_eng_crop, fill = "grey95") +
+  geom_sf(data = eng_only, fill = "grey80") +
+  geom_sf(
+    data = NP,
+    aes(fill = "National Parks"),
+    colour = NA,
+    alpha = 0.2
+  ) +
+  geom_sf(
+    data = NL,
+    aes(fill = "National Landscapes"),
+    colour = NA,
+    alpha = 0.2
+  ) +
+  geom_sf(
+    data = SSSI,
+    aes(fill = "Sites of Special Scientific Interest"),
+    colour = NA,
+    alpha = 0.5
+  ) +
+  geom_sf(
+    aes(fill = "Targeted grid cells"),
+    colour = NA
+  ) +
+  scale_fill_manual(
+    name = NULL,
+    breaks = c(
+      "Targeted grid cells",
+      "National Parks",
+      "National Landscapes",
+      "Sites of Special Scientific Interest"
+    ),
+    values = c(
+      "Targeted grid cells" = "red",
+      "National Parks" = "forestgreen",
+      "National Landscapes" = "blue",
+      "Sites of Special Scientific Interest" = "orange"
+    ),
+    guide = guide_legend(
+      nrow = 1,
+      byrow = TRUE,
+      override.aes = list(
+        alpha = c(1, 0.5, 0.5, 0.7),
+        colour = NA
+      )
+    )
+  ) +
+  map_coord +
+  map_theme
+
 
 # ====
-# === Biogeographic representation across solution space
+# === Create solution mapping panel
 # ====
+
+# = Panel with min, max, and selection freq panels
+footprint_panel <-
+  unconst_footprint_sol +
+  pc85_footprint_sol +
+  pc100_footprint_sol +
+  plot_layout(
+    nrow = 1,
+    widths = c(1, 1, 1),
+    guides = "collect"
+  ) +
+  plot_annotation(
+    tag_levels = "a"
+  ) &
+  theme(
+    text = element_text(
+      family = nature_font
+    ),
+    plot.tag = element_text(
+      family = nature_font,
+      size = 7,
+      face = "bold"
+    ),
+    plot.tag.position = c(0, 1),
+    
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.text = element_text(size = 5.5),
+    legend.key.width = grid::unit(4, "mm"),
+    legend.key.height = grid::unit(3, "mm"),
+    legend.spacing.x = grid::unit(1.5, "mm"),
+    legend.margin = margin(
+      t = 2,
+      r = 0,
+      b = 0,
+      l = 0,
+      unit = "pt"
+    )
+  )
+
+# = Save as pdf and png
+ggsave(
+  filename = "outputs/Fig2_footprint_panel.pdf",
+  plot = footprint_panel,
+  device = cairo_pdf,
+  width = 180,
+  height = 60,
+  units = "mm",
+  bg = "white"
+)
+
+ggsave(
+  filename = "outputs/Fig2_footprint_panel.png",
+  plot = footprint_panel,
+  width = 180,
+  height = 60,
+  units = "mm",
+  dpi = 300,
+  bg = "white"
+)
+
+
+# ------------------------------------------------------------------------------
+# Figure 3 - Biogeographic representation across solution space
+# ------------------------------------------------------------------------------
 
 # === Zone area
 zone_area_df <- bio_geo_zone %>%
@@ -1042,12 +1561,13 @@ zone_area_df <- bio_geo_zone %>%
   )
 
 # === Extract select by biogeographic region
-footprint_per_zone <- lapply(c(seq(1, 1175, 10), 1175), function(i) {
+l <- length(best_solution_constructed)
+footprint_per_zone <- lapply(c(seq(1, l, 10), l), function(i) {
   
   print(i)
   
   # Get temp x
-  tmp <- pareto_front_on_K_b1_e1[[i]]$best_state$x
+  tmp <- best_solution_constructed[[i]]$best_state$x
   
   # Map to actual area because best assumes equal cost for partial cells
   best_area_actual_size <- sum(tmp * area_km2, na.rm = TRUE)
@@ -1069,8 +1589,8 @@ footprint_per_zone <- lapply(c(seq(1, 1175, 10), 1175), function(i) {
     mutate(
       footprint_in_zone = replace_na(footprint_in_zone, 0),
       
-      k = pareto_front_on_K_b1_e1[[i]]$K,
-      N10 = pareto_front_on_K_b1_e1[[i]]$best_state$N10,
+      k = best_solution_constructed[[i]]$K,
+      N10 = best_solution_constructed[[i]]$best_state$N10,
       best_footprint_area_km = best_area_actual_size,
       
       total_zone_area_km2 = sum(zone_area_km2, na.rm = TRUE),
@@ -1113,7 +1633,7 @@ footprint_plot_dat <- footprint_per_zone_df %>%
   mutate(
     Zone = factor(as.character(Zone), levels = zone_levels_chr),
     observed_expected_ratio = observed_expected_ratio
-    )
+  )
 map_dat <- bio_geo_zone_bd %>%
   mutate(
     Zone = factor(as.character(Zone), levels = zone_levels_chr)
@@ -1270,7 +1790,6 @@ footprint_per_zone_by_N10 <- ggplot() +
     y = "Observed / expected footprint\n(values > 1 = greater than expected)"
   )
 
-
 # = Insert map
 bio_geo_zone_map_inset <- ggplot() +
   geom_sf(
@@ -1335,7 +1854,26 @@ zones_panel <- footprint_per_zone_by_N10 +
     align_to = "panel",
     clip = TRUE
   )
+
 # == Selectiion frequency
+
+# = Calculate selection frequency
+l <- length(best_solution_constructed)
+selection_by_cell <- lapply(seq_len(l), function(x) {
+  best_solution_constructed[[x]]$best_state$x 
+})
+selection_by_cell <- do.call(cbind, selection_by_cell)
+selection_by_cell <- rowSums(selection_by_cell)
+selection_by_cell_df <- data.frame(os_gridref = os_gridref_inc,
+                                   selection_count = selection_by_cell)
+selection_by_cell_df$selection_freq <- round(selection_by_cell_df$selection_count / l, 4) *100
+selection_freq_sf <- left_join(eng10km2, selection_by_cell_df)
+selection_freq_sf <- selection_freq_sf %>% 
+  filter(selection_freq > 0)
+
+selection_freq_sf$selection_freq[selection_freq_sf$selection_freq > 95]
+
+# = Plot selection frequency
 cell_selection_frequency <- ggplot(selection_freq_sf) +
   geom_sf(
     data = gb_eng_crop,
@@ -1350,10 +1888,13 @@ cell_selection_frequency <- ggplot(selection_freq_sf) +
     ),
     linewidth = 0.05
   ) +
-  scale_fill_gradientn(
-    colours = cols,
-    values = scales::rescale(c(0, 5, 20, 60, 100)),
+  scale_fill_viridis_c(
+    option = "inferno",
+    direction = 1,
+    begin = 0.30,
+    end = 1,
     limits = c(0, 100),
+    breaks = c(0, 25, 50, 75, 100),
     na.value = "grey80",
     name = "Selected (%)",
     guide = guide_colourbar(
@@ -1365,12 +1906,13 @@ cell_selection_frequency <- ggplot(selection_freq_sf) +
       frame.linewidth = line_boundary
     )
   ) +
-  scale_colour_gradientn(
-    colours = cols,
-    values = scales::rescale(c(0, 5, 20, 60, 100)),
+  scale_colour_viridis_c(
+    option = "inferno",
+    direction = 1,
+    begin = 0.30,
+    end = 1,
     limits = c(0, 100),
     na.value = "grey80",
-    name = "Selected (%)",
     guide = "none"
   ) +
   coord_sf(
@@ -1476,332 +2018,75 @@ ggsave(
   bg = "white"
 )
 
-
-# === 
-# === Uncontrained (K_target = 0)
+# ===
+# == Statistics of overlap with SSSI, NP, NL
 # ===
 
-# = Get the K_target = 0 solution
-K0_solution <- pareto_front_on_K_b1_e1[[1]]$best_state$x
+footprint_solmin <- unconst_footprint_sf |> 
+  filter(footprint == 1) 
+total_area_solmin <- sum(as.numeric(footprint_solmin$area)) 
 
-# = Convert to sf
-unconst_footprint <- cbind(asai_cxs_eng[, 1], footprint = K0_solution)
-unconst_footprint_sf <- left_join(eng10km2, unconst_footprint, by = join_by(os_gridref)) %>%
-  mutate(footprint = factor(footprint)) %>%
-  filter(!is.na(footprint))
+footprint_pc100 <- pc100_footprint_sf |> 
+  filter(footprint == 1) 
+total_area_pc100 <- sum(as.numeric(footprint_pc100$area)) 
 
-# = Create map of selected cells
-unconst_footprint_sol <-
-  ggplot(
-    unconst_footprint_sf[
-      unconst_footprint_sf$footprint == 1,
-    ]
-  ) +
-  geom_sf(data = gb_eng_crop, fill = "grey95") +
-  geom_sf(data = eng_only, fill = "grey80") +
-  geom_sf(
-    data = NP,
-    aes(fill = "National Parks"),
-    colour = NA,
-    alpha = 0.2
-  ) +
-  geom_sf(
-    data = NL,
-    aes(fill = "National Landscapes"),
-    colour = NA,
-    alpha = 0.2
-  ) +
-  geom_sf(
-    data = SSSI,
-    aes(fill = "Sites of Special Scientific Interest"),
-    colour = NA,
-    alpha = 0.5
-  ) +
-  geom_sf(
-    aes(fill = "Targeted grid cells"),
-    colour = NA
-  ) +
-  scale_fill_manual(
-    name = NULL,
-    breaks = c(
-      "Targeted grid cells",
-      "National Parks",
-      "National Landscapes",
-      "Sites of Special Scientific Interest"
-    ),
-    values = c(
-      "Targeted grid cells" = "red",
-      "National Parks" = "forestgreen",
-      "National Landscapes" = "blue",
-      "Sites of Special Scientific Interest" = "orange"
-    ),
-    guide = guide_legend(
-      nrow = 1,
-      byrow = TRUE,
-      override.aes = list(
-        alpha = c(1, 0.5, 0.5, 0.7),
-        colour = NA
-      )
-    )
-  ) +
-  # Scale bar sized for a c. 60 mm-wide panel
-  annotation_scale(
-    location = "br",
-    width_hint = 0.28,
-    style = "ticks",
-    
-    line_width = 0.45,
-    line_col = "grey10",
-    text_col = "grey10",
-    
-    text_cex = 0.65,
-    text_family = nature_font,
-    
-    height = grid::unit(1.2, "mm"),
-    pad_x = grid::unit(2, "mm"),
-    pad_y = grid::unit(2, "mm"),
-    text_pad = grid::unit(1, "mm")
-  ) +
-  
-  # North arrow sized explicitly in physical units
-  annotation_north_arrow(
-    location = "tr",
-    height = grid::unit(8, "mm"),
-    width = grid::unit(8, "mm"),
-    pad_x = grid::unit(2, "mm"),
-    pad_y = grid::unit(2, "mm"),
-    style = north_arrow_orienteering(
-      line_width = 0.45,
-      line_col = "grey10",
-      text_col = "grey10",
-      text_family = nature_font,
-      text_size = 6
-    )
-  ) +
-  map_coord +
-  map_theme
+# === PA ===
 
-# === 
-# === N10 = 85% 
-# ===
+# = Minimum solution area-based
+np_solution_solmin <- st_intersection(footprint_solmin, NP)
+np_solution_solmin$area <- st_area(np_solution_solmin)
+np_area_solmin <- sum(as.numeric(np_solution_solmin$area ))
 
-# === Which is the best 85% solution
-which_best_85pc <- rbindlist(lapply(1:length(pareto_front_on_K_b1_e1), function(x){
-  tmp <- pareto_front_on_K_b1_e1[[x]]
-  data.frame(x = x, N10 = tmp$best_state$N10, best_area = tmp$best_area)
-}))
+# Overlap solution minimum area and NP
+np_area_solmin / total_area_solmin
 
-# How many species is 85%
-nSp85 <- ceiling(nS*0.85)
+# = 100% species meeting targets
+np_solution_pc100 <- st_intersection(footprint_pc100, NP)
+np_solution_pc100$area <- st_area(np_solution_pc100)
+np_area_pc100 <- sum(as.numeric(np_solution_pc100$area ))
 
-# Best index
-best_85pc_ind <- which_best_85pc[which_best_85pc$N10 == nSp85,]
+# Overlap solution minimum area and NP
+np_area_pc100 / total_area_solmin
 
-# === Get the N10 = 85% solution
-N10_85_solution <- pareto_front_on_K_b1_e1[[best_85pc_ind$x]]$best_state$x
+# === SSSI ===
 
-# = Convert to sf
-pc85_footprint <- cbind(asai_cxs_eng[, 1], footprint = N10_85_solution)
-pc85_footprint_sf <- left_join(eng10km2, pc85_footprint, by = join_by(os_gridref)) %>%
-  mutate(footprint = factor(footprint)) %>%
-  filter(!is.na(footprint))
+# = Minimum solution area-based
+sssi_solution_solmin <- st_intersection(footprint_solmin, SSSI)
+sssi_solution_solmin$area <- st_area(sssi_solution_solmin)
+sssi_area_solmin <- sum(as.numeric(sssi_solution_solmin$area ))
 
-# = Create map of selected cells
-pc85_footprint_sol <-
-  ggplot(
-    pc85_footprint_sf[
-      pc85_footprint_sf$footprint == 1,
-    ]
-  ) +
-  geom_sf(data = gb_eng_crop, fill = "grey95") +
-  geom_sf(data = eng_only, fill = "grey80") +
-  geom_sf(
-    data = NP,
-    aes(fill = "National Parks"),
-    colour = NA,
-    alpha = 0.2
-  ) +
-  geom_sf(
-    data = NL,
-    aes(fill = "National Landscapes"),
-    colour = NA,
-    alpha = 0.2
-  ) +
-  geom_sf(
-    data = SSSI,
-    aes(fill = "Sites of Special Scientific Interest"),
-    colour = NA,
-    alpha = 0.5
-  ) +
-  geom_sf(
-    aes(fill = "Targeted grid cells"),
-    colour = NA
-  ) +
-  scale_fill_manual(
-    name = NULL,
-    breaks = c(
-      "Targeted grid cells",
-      "National Parks",
-      "National Landscapes",
-      "Sites of Special Scientific Interest"
-    ),
-    values = c(
-      "Targeted grid cells" = "red",
-      "National Parks" = "forestgreen",
-      "National Landscapes" = "blue",
-      "Sites of Special Scientific Interest" = "orange"
-    ),
-    guide = guide_legend(
-      nrow = 1,
-      byrow = TRUE,
-      override.aes = list(
-        alpha = c(1, 0.5, 0.5, 0.7),
-        colour = NA
-      )
-    )
-  ) +
-  map_coord +
-  map_theme
+# Overlap solution minimum area and SSSI
+sssi_area_solmin / total_area_solmin
 
-# === 
-# === N10 = 1174
-# ===
+# = 100% species meeting targets
+sssi_solution_pc100 <- st_intersection(footprint_pc100, SSSI)
+sssi_solution_pc100$area <- st_area(sssi_solution_pc100)
+sssi_area_pc100 <- sum(as.numeric(sssi_solution_pc100$area ))
 
-# = Get the K_target = 0 solution
-N10_100_solution <- pareto_front_on_K_b1_e1[[length(pareto_front_on_K_b1_e1)]]$best_state$x
+# Overlap solution minimum area and SSSI
+sssi_area_pc100 / total_area_solmin
 
-# = Convert to sf
-pc100_footprint <- cbind(asai_cxs_eng[, 1], footprint = N10_100_solution)
-pc100_footprint_sf <- left_join(eng10km2, pc100_footprint, by = join_by(os_gridref)) %>%
-  mutate(footprint = factor(footprint)) %>%
-  filter(!is.na(footprint))
+# === NL ===
 
-# = Create map of selected cells
-pc100_footprint_sol <-
-  ggplot(
-    pc100_footprint_sf[
-      pc100_footprint_sf$footprint == 1,
-    ]
-  ) +
-  geom_sf(data = gb_eng_crop, fill = "grey95") +
-  geom_sf(data = eng_only, fill = "grey80") +
-  geom_sf(
-    data = NP,
-    aes(fill = "National Parks"),
-    colour = NA,
-    alpha = 0.2
-  ) +
-  geom_sf(
-    data = NL,
-    aes(fill = "National Landscapes"),
-    colour = NA,
-    alpha = 0.2
-  ) +
-  geom_sf(
-    data = SSSI,
-    aes(fill = "Sites of Special Scientific Interest"),
-    colour = NA,
-    alpha = 0.5
-  ) +
-  geom_sf(
-    aes(fill = "Targeted grid cells"),
-    colour = NA
-  ) +
-  scale_fill_manual(
-    name = NULL,
-    breaks = c(
-      "Targeted grid cells",
-      "National Parks",
-      "National Landscapes",
-      "Sites of Special Scientific Interest"
-    ),
-    values = c(
-      "Targeted grid cells" = "red",
-      "National Parks" = "forestgreen",
-      "National Landscapes" = "blue",
-      "Sites of Special Scientific Interest" = "orange"
-    ),
-    guide = guide_legend(
-      nrow = 1,
-      byrow = TRUE,
-      override.aes = list(
-        alpha = c(1, 0.5, 0.5, 0.7),
-        colour = NA
-      )
-    )
-  ) +
-  map_coord +
-  map_theme
+# = Minimum solution area-based
+nl_solution_solmin <- st_intersection(footprint_solmin, NL)
+nl_solution_solmin$area <- st_area(nl_solution_solmin)
+nl_area_solmin <- sum(as.numeric(nl_solution_solmin$area ))
 
+# Overlap solution minimum area and NL
+nl_area_solmin / total_area_solmin
 
-# ====
-# === Create solution mapping panel
-# ====
+# = 100% species meeting targets
+nl_solution_pc100 <- st_intersection(footprint_pc100 , NL)
+nl_solution_pc100 $area <- st_area(nl_solution_pc100 )
+nl_area_pc100  <- sum(as.numeric(nl_solution_pc100 $area ))
 
-# = Panel with min, max, and selection freq panels
-footprint_panel <-
-  unconst_footprint_sol +
-  pc85_footprint_sol +
-  pc100_footprint_sol +
-  plot_layout(
-    nrow = 1,
-    widths = c(1, 1, 1),
-    guides = "collect"
-  ) +
-  plot_annotation(
-    tag_levels = "a"
-  ) &
-  theme(
-    text = element_text(
-      family = nature_font
-    ),
-    plot.tag = element_text(
-      family = nature_font,
-      size = 7,
-      face = "bold"
-    ),
-    plot.tag.position = c(0, 1),
-    
-    legend.position = "bottom",
-    legend.direction = "horizontal",
-    legend.text = element_text(size = 5.5),
-    legend.key.width = grid::unit(4, "mm"),
-    legend.key.height = grid::unit(3, "mm"),
-    legend.spacing.x = grid::unit(1.5, "mm"),
-    legend.margin = margin(
-      t = 2,
-      r = 0,
-      b = 0,
-      l = 0,
-      unit = "pt"
-    )
-  )
+# Overlap solution minimum area and NL
+nl_area_pc100  / total_area_solmin
 
-# = Save as pdf and png
-ggsave(
-  filename = "outputs/Fig2_footprint_panel.pdf",
-  plot = footprint_panel,
-  device = cairo_pdf,
-  width = 180,
-  height = 60,
-  units = "mm",
-  bg = "white"
-)
-
-ggsave(
-  filename = "outputs/Fig2_footprint_panel.png",
-  plot = footprint_panel,
-  width = 180,
-  height = 60,
-  units = "mm",
-  dpi = 300,
-  bg = "white"
-)
-
-  
-# ====
-# === Habitat representation
-# ===
+# ------------------------------------------------------------------------------
+# Figure 4 - Habitat representation across solution space
+# ------------------------------------------------------------------------------
 
 # == Ebrel version matching habitat_types_lookup
 habExist100m <- rast(file.path(shStdDat, "ebrel_landcover_100m_england_wales.tif"))
@@ -1886,6 +2171,9 @@ hab_compare[, log2_ratio_s := fifelse(ratio_s > 0, log2(ratio_s), NA_real_)]
 hab_compare[, log2_ratio_85 := fifelse(ratio_85 > 0, log2(ratio_85), NA_real_)]
 hab_compare[, log2_ratio_100 := fifelse(ratio_100 > 0, log2(ratio_100), NA_real_)]
 
+# Replace NAs
+hab_compare[is.na(hab_compare)] <- 0
+
 # Mean enrichment across both scenarios
 hab_compare[, mean_log2_ratio := rowMeans(.SD, na.rm = TRUE),.SDcols = c("log2_ratio_s", "log2_ratio_100")]
 
@@ -1897,6 +2185,8 @@ hab_compare <- merge(
   by.y = "ebrel_hab_code",
   all.x = TRUE
 )
+
+hab_compare <- hab_compare[!is.na(hab_compare$habitat),]
 
 # Tidy habitat names before setting factor order
 hab_compare[, habitat := gsub("_", " ", habitat)]
@@ -1931,7 +2221,6 @@ hab_long[
 hab_long[, habitat := factor(habitat, levels = hab_order)]
 
 # Plot observed vs expected habitat ratios
-
 habitat_representation <-
   ggplot(
     hab_long,
@@ -2081,9 +2370,335 @@ ggsave(
   dpi = 300,
   bg = "white"
 )
-  
 
-# ====
+# ------------------------------------------------------------------------------
+# Figure 5 - Species traits associated with selection
+# ------------------------------------------------------------------------------
+
+# Look at the traits associated with species selected early vs late
+
+# === Species names
+species_names <- gsub("_", " ", colnames(optimisation_data$P_over_R))
+
+# === Re-load compiled data
+asai_info_compiled <- fread("outputs/bdi_asai_compiled_species_information.csv")
+asai_info_compiled_1174 <- asai_info_compiled[asai_info_compiled$BDI_NAME_CHECK %in% species_names, ]
+
+# === Complete missing CLASS assignments
+# Fish - Actinopterygii
+asai_info_compiled_1174$CLASS[asai_info_compiled_1174$ORDER %in% c(
+  "Anguilliformes", "Atheriniformes", "Clupeiformes", "Cypriniformes", "Esociformes",
+  "Gasterosteiformes", "Mugiliformes", "Osmeriformes", "Perciformes",
+  "Pleuronectiformes", "Salmoniformes", "Scorpaeniformes", "Syngnathiformes"
+)] <- "Actinopterygii"
+
+asai_info_compiled_1174$CLASS[asai_info_compiled_1174$SCIENTIFIC_NAME %in% c(
+  "Gymnocephalus cernuus", "Liza aurata", "Liza ramada"
+)] <- "Actinopterygii"
+
+# Tubular worm
+asai_info_compiled_1174$CLASS[asai_info_compiled_1174$ORDER %in% c("Tricladida")]  <-"Turbellaria"
+
+# === Create plot of inclusion by class and K10 target
+
+# = Find the N10 ranking for each list element
+N10_list_index <- unlist(lapply(1:length(best_solution_constructed), function(i) {
+  best_solution_constructed[[i]]$best_state$N10
+}))
+
+# = Add progressive targets to data.table
+add_progressive_targets(
+  asai_info_compiled = asai_info_compiled_1174,
+  pareto_front_on_K = best_solution_constructed,
+  N10_list_index = N10_list_index,
+  species_names = species_names
+)
+
+# = Create figure
+prog_N10_class_plot <- plot_progressive_taxon_stack(
+  asai_info_compiled_1174,
+  taxon_col = "CLASS"
+)
+ggsave("outputs/progressive_N10_by_class.png", 
+       plot = prog_N10_class_plot, 
+       width = 8, height = 7)
+
+# = Table for statistics
+prog_N10_class_table <- plot_progressive_taxon_stack(
+  asai_info_compiled_1174,
+  taxon_col =   c("CLASS"),
+  return_dt = TRUE
+)
+
+# = Target N30 taxon representation
+prog_N10_class_table[,
+                     prop := N / sum(N), by = first_included][, 
+                                                              total_class_n := as.integer(sub(".*\\(([0-9]+)\\)$", "\\1", 
+                                                                                              as.character(taxon_label)))
+                     ][
+                       , prop_expect := total_class_n / 1174
+                     ][
+                       , delta_expect := (prop - prop_expect) 
+                     ][first_included == "N_30"]
+
+# = Split taxon_label into CLASS, DOMAIN, and taxon_n
+class_by_domain_by_N10 <- copy(prog_N10_class_table)
+class_by_domain_by_N10[, c("CLASS", "domain_with_n") := tstrsplit(as.character(taxon_label)," \\| ")
+][,DOMAIN := sub(" \\([0-9]+\\)$", "", domain_with_n)
+][, taxon_n := as.integer(sub(".*\\(([0-9]+)\\)$", "\\1", domain_with_n))
+][,domain_with_n := NULL]
+
+# Count species per first_included class per DOMAIN
+domain_first_included_summary <- class_by_domain_by_N10[,.(N = sum(N)), by = .(DOMAIN, first_included)]
+
+# === Calculate proportion within each DOMAIN
+domain_first_included_summary[,prop := N / sum(N), by = first_included]
+
+# = N30 
+n30_non_terrestrial <- domain_first_included_summary[first_included == "N_30" & 
+                                                       !(DOMAIN %in% c("Terrestrial", "Mixed/Other"))]
+sum(n30_non_terrestrial$N)/nS
+# 51.7% of species select by n30 associated with Freshwater, marine, intertidal
+# vs. 
+
+# = Total domain counts / proportions
+domain_proportions <- asai_info_compiled_1174 %>% 
+  group_by(DOMAIN) %>% 
+  summarise(N = n())
+
+# Non-terrestrial
+non_terr <- domain_proportions %>% 
+  filter(!(DOMAIN %in% c("Terrestrial", "Mixed/Other")))
+sum(non_terr$N) / nS
+# 29.39% of the full species list
+
+# ------------------------------------------------------------------------------
+# Figure 6 - Range size by scenario
+# ------------------------------------------------------------------------------
+
+# === Load ranges
+range_size <- fread("outputs/range_sizes.csv")
+
+# == Unconstrained solution ranges
+unconstrained_ranges <-
+  range_size$range_size[which(best_solution_constructed[[1]]$best_state$m_s >= 1.1)]
+summary(unconstrained_ranges)
+# Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+# 4.578  2813.259  8678.919  7404.841 10972.352 19708.577 
+
+# == 85% species representation
+sol85_ranges <-
+  range_size$range_size[
+    which(best_solution_constructed[[best_85pc_ind$x]]$best_state$m_s >= 1.1)]
+summary(sol85_ranges)
+# Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+# 4.58  2802.86  6723.34  7484.57 10607.18 39823.18 
+
+# == 100% species representation
+summary(range_size$range_size)
+# Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+# 0.14   3186.80   7254.61  14712.06  11947.17 120293.16 
+
+
+# Number of species with  ranges larger than the largest in the unconstrainted solution
+sum(range_size$range_size > 19708.577)
+
+# == Test the expectation of inclusion for small range species 
+# Use a permutation test to test the observed against expected inclusion of
+# species with the smallest ranges (lowest 10%).
+
+# Just for reproducability
+set.seed(123)
+
+# Set pools
+selected_ranges <- sol85_ranges
+pool_ranges     <- range_size$range_size
+n_selected <- length(selected_ranges)
+
+# Set smallest 10% of ranges
+small_range_threshold <- quantile(
+  pool_ranges,
+  probs = 0.1,
+  na.rm = TRUE
+)
+
+# Observed number with <= 10% range size
+observed_n_small <- sum(selected_ranges <= small_range_threshold)
+
+# Permutation selection of observed_n_small
+n_iter = 100
+null_n_small <- replicate(
+  n_iter,
+  {
+    random_sample <- sample(
+      pool_ranges,
+      size = n_selected,
+      replace = FALSE
+    )
+    
+    sum(random_sample <= small_range_threshold)
+  }
+)
+
+# P-value for this sample
+p_value_small <- (
+  sum(null_n_small >= observed_n_small) + 1
+) / (n_iter + 1)
+
+data.frame(
+  threshold = small_range_threshold,
+  observed_n_small = observed_n_small,
+  expected_n_small = mean(null_n_small),
+  observed_proportion = observed_n_small / n_selected,
+  expected_proportion = mean(null_n_small) / n_selected,
+  p_value = p_value_small
+)
+
+# = Unconstrained 
+# threshold observed_n_small expected_n_small observed_proportion expected_proportion    p_value
+# 1019.405        80            61.81           0.1317957           0.1018287           0.00990099
+
+# 85% species targets
+# threshold observed_n_small expected_n_small observed_proportion expected_proportion    p_value
+# 1019.405        112           100.52           0.1122244           0.1007214         0.00990099
+
+# === Create range size histogram
+range_plot_data <- data.frame(
+  range_size = c(
+    unconstrained_ranges,
+    sol85_ranges,
+    range_size$range_size
+  ),
+  type = rep(
+    c("GM target only (unconstrained)", 
+      "GM target & 85% species reaching +10% abundance target",
+      "GM target & 100% species reaching +10% abundance target"),
+    c(length(unconstrained_ranges), length(sol85_ranges), nrow(range_size))
+  )
+)
+
+# Facet
+range_size_by_solution <- ggplot(
+  range_plot_data,
+  aes(
+    x = range_size,
+    fill = type
+  )
+) +
+  geom_histogram(
+    bins = 100,
+    alpha = 0.8,
+    colour = "white",
+    linewidth = 0.08
+  ) +
+  facet_wrap(
+    ~type,
+    ncol = 1,
+    scales = "free_y",
+    labeller = labeller(
+      type = label_wrap_gen(width = 70)
+    )
+  ) +
+  scale_x_continuous(
+    breaks = scales::breaks_extended(n = 4),
+    labels = scales::label_comma(accuracy = 1),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_fill_manual(
+    values = solution_cols,
+    breaks = rev(solution_levels),
+    drop = FALSE,
+    guide = guide_legend(
+      reverse = TRUE,
+      ncol = 1,
+      byrow = TRUE
+    )
+  ) +
+  labs(
+    x = expression("Range size (km"^2 * ")"),
+    y = "Number of species"
+  ) +
+  guides(fill = "none") +
+  theme_bw(
+    base_size = 7,
+    base_family = "Arial"
+  ) +
+  theme(
+    axis.title = element_text(size = 7),
+    axis.title.x = element_text(
+      margin = margin(t = 3, unit = "pt")
+    ),
+    axis.title.y = element_text(
+      margin = margin(r = 3, unit = "pt")
+    ),
+    axis.text = element_text(
+      size = 6,
+      colour = "black"
+    ),
+    
+    axis.ticks = element_line(linewidth = 0.18),
+    axis.ticks.length = grid::unit(1.5, "mm"),
+    
+    strip.background = element_blank(),
+    strip.text = element_text(
+      size = 6,
+      face = "bold",
+      hjust = 0,
+      lineheight = 0.9,
+      margin = margin(
+        t = 2,
+        r = 0,
+        b = 2,
+        l = 0,
+        unit = "pt"
+      )
+    ),
+    
+    panel.border = element_rect(
+      colour = "black",
+      linewidth = 0.18
+    ),
+    panel.grid.major = element_line(
+      colour = "grey88",
+      linewidth = 0.12
+    ),
+    panel.grid.minor = element_blank(),
+    
+    panel.spacing.y = grid::unit(3, "mm"),
+    
+    plot.margin = margin(
+      t = 3,
+      r = 8,
+      b = 3,
+      l = 3,
+      unit = "pt"
+    )
+  )
+
+ggsave(
+  filename = "outputs/Fig6_range_size_by_solution.pdf",
+  plot = range_size_by_solution,
+  device = cairo_pdf,
+  width = 88,
+  height = 110,
+  units = "mm",
+  bg = "white"
+)
+
+ggsave(
+  filename = "outputs/Fig6_range_size_by_solution.png",
+  plot = range_size_by_solution,
+  width = 88,
+  height = 110,
+  units = "mm",
+  dpi = 300,
+  bg = "white"
+)
+
+
+#------------------------------------------------------------------------------#
+#----------------------------------END-----------------------------------------#
+#------------------------------------------------------------------------------## ====
 # === Species traits associated with selection
 # ====
 

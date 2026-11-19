@@ -121,7 +121,7 @@ solve_pareto_front_incremental <- function(P_over_R,
     GM_target = GM_target,
     K = K0,
     cost = cost,
-    sparse = sparse,
+    incumbent = NULL,
     randomise_within_cost_prune = randomise_within_cost_prune
   )
   
@@ -160,7 +160,8 @@ solve_pareto_front_incremental <- function(P_over_R,
           top_expand = top_expand,
           overshoot_lambda = overshoot_lambda,
           randomise_within_cost_prune = randomise_within_cost_prune,
-          fallback = "none"
+          fallback = "none",
+          P_over_R = P_over_R
         )
         
       }
@@ -864,7 +865,15 @@ prune_feasible_for_K <- function(state, sparse, GM_target, K,
       blocks <- lapply(seq_along(rl$lengths), function(i) {
         ord[starts[i]:(starts[i] + rl$lengths[i] - 1)]
       })
-      ord <- unlist(lapply(blocks, function(b) sample(b, length(b))), use.names = FALSE)
+      ord <- unlist(
+        lapply(blocks, function(b) {
+          b[sample.int(length(b))]
+        }),
+        use.names = FALSE
+      )
+      stopifnot(
+        identical(sort(ord), sort(cand_rem))
+      )
     }
     
     # Check candidates for removal 
@@ -1420,7 +1429,8 @@ advance_K_by_one <- function(state,
                              top_expand = 12,
                              overshoot_lambda = overshoot_lambda,
                              randomise_within_cost_prune = TRUE,
-                             fallback = c("none", "full_solve")) {
+                             fallback = c("none", "full_solve"),
+                             P_over_R = NULL) {
   
   # What to do if advancing by one can't find a solution
   fallback <- match.arg(fallback)
@@ -1491,7 +1501,7 @@ advance_K_by_one <- function(state,
   if (fallback == "full_solve") {
     return(
       solve_min_footprint_given_K(
-        P_over_R = NULL, # replace with actual object in outer wrapper
+        P_over_R = P_over_R, # replace with actual object in outer wrapper
         beta = state$beta,
         GM_target = GM_target,
         K = target_K,
